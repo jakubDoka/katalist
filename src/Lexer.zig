@@ -4,6 +4,7 @@ const maxIdentLen = @import("Ident.zig").cap;
 const Self = @This();
 pub const Token = enum(u8) {
     Ident,
+    Underscore,
     Number,
 
     Add,
@@ -21,10 +22,12 @@ pub const Token = enum(u8) {
     LBrack,
     RBrack,
 
-    KeyLet,
-    KeyRet,
+    KeyVar,
+    KeyConst,
+    KeyReturn,
     KeyFn,
     KeyUsize,
+    KeyIsize,
     KeyVoid,
 
     Int,
@@ -99,6 +102,10 @@ pub fn nextToken(self: *Self) TokenMeta {
                         'a'...'z', 'A'...'Z', '_', '0'...'9' => _ = self.advance(),
                         else => break,
                     }
+                }
+
+                if (self.source[pos] == '_' and self.cursor - pos == 1) {
+                    break :b .Underscore;
                 }
 
                 if (self.cursor - pos > maxIdentLen) {
@@ -223,7 +230,7 @@ test {
 }
 
 test "keyword" {
-    try std.testing.expectEqual(Token.KeyLet, Token.dispatchKeyword("let").?);
+    try std.testing.expectEqual(Token.KeyVar, Token.dispatchKeyword("var").?);
     try std.testing.expectEqual(@as(?Token, null), Token.dispatchKeyword("fl"));
 }
 
@@ -251,16 +258,4 @@ test "sanity" {
         const token = lexer.nextToken();
         try std.testing.expectEqualStrings(ex, token.source);
     }
-}
-
-test "keyword bug" {
-    const source = "fet";
-    var lexer = Self.init(source);
-    const token = lexer.nextToken();
-    try std.testing.expectEqual(token.kind, .Ident);
-
-    const source2 = "let";
-    var lexer2 = Self.init(source2);
-    const token2 = lexer2.nextToken();
-    try std.testing.expectEqual(token2.kind, .KeyLet);
 }

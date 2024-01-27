@@ -20,8 +20,63 @@ pub fn UnionAsPtr(comptime T: type) type {
 }
 
 pub fn Id(comptime T: type) type {
-    const Index = @Type(.{ .Int = .{ .signedness = std.builtin.Signedness.unsigned, .bits = @bitSizeOf(BackingInt) - @bitSizeOf(T) } });
-    return packed struct(BackingInt) { tag: T, index: Index };
+    const Index = @Type(.{ .Int = .{
+        .signedness = std.builtin.Signedness.unsigned,
+        .bits = @bitSizeOf(BackingInt) - @bitSizeOf(T),
+    } });
+
+    return packed struct(BackingInt) {
+        tag: T,
+        index: Index,
+
+        pub fn eql(self: @This(), other: @This()) bool {
+            return self.tag == other.tag and self.index == other.index;
+        }
+
+        pub fn encode(data: anytype) ?@This() {
+            if (@TypeOf(data) == T) {
+                return .{ .tag = data, .index = 0 };
+            }
+
+            return switch (data) {
+                inline else => |val, tag| encodeStatic(tag, val),
+            };
+        }
+
+        pub fn encodeStatic(comptime tag: T, data: anytype) ?@This() {
+            if (@sizeOf(@TypeOf(data)) == 0) {
+                return .{ .tag = tag, .index = 0 };
+            }
+
+            if (comptime isInlined(@TypeOf(tag), @TypeOf(data))) {
+                const Int = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(data)));
+                return .{ .tag = tag, .index = @intCast(@as(Int, @bitCast(data))) };
+            }
+
+            return null;
+        }
+
+        pub fn decode(comptime D: type, self: @This()) ?D {
+            return switch (self.tag) {
+                inline else => |tag| decodeStatic(D, tag, self.index),
+            };
+        }
+
+        pub fn decodeStatic(comptime D: type, comptime tag: T, index: Index) ?D {
+            const field = std.meta.fieldInfo(D, tag);
+
+            if (@sizeOf(field.type) == 0) {
+                return @unionInit(D, field.name, {});
+            }
+
+            if (comptime isInlined(@TypeOf(tag), field.type)) {
+                const Int = std.meta.Int(.unsigned, @bitSizeOf(field.type));
+                return @unionInit(D, field.name, @bitCast(@as(Int, @intCast(index))));
+            }
+
+            return null;
+        }
+    };
 }
 
 const EnumMetadata = struct {
@@ -165,14 +220,7 @@ pub fn Unmanaged(comptime T: type) type {
         pub fn push(self: *Self, alloc: std.mem.Allocator, value: T) std.mem.Allocator.Error!Index {
             switch (value) {
                 inline else => |val, tag| {
-                    if (@sizeOf(@TypeOf(val)) == 0) {
-                        return .{ .tag = tag, .index = 0 };
-                    }
-
-                    if (comptime isInlined(@TypeOf(tag), @TypeOf(val))) {
-                        const Int = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(val)));
-                        return .{ .tag = tag, .index = @intCast(@as(Int, @bitCast(val))) };
-                    }
+                    if (Index.encodeStatic(tag, val)) |id| return id;
 
                     inline for (meta.field_names, meta.unions, meta.union_types) |nm, un, un_ty| {
                         inline for (un.fields) |f| {
@@ -185,22 +233,38 @@ pub fn Unmanaged(comptime T: type) type {
                     }
                 },
             }
+
+            unreachable;
+        }
+
+        pub fn find_or_push(self: *Self, alloc: std.mem.Allocator, value: T) std.mem.Allocator.Error!Index {
+            switch (value) {
+                inline else => |val, tag| {
+                    if (Index.encodeStatic(tag, val)) |id| return id;
+
+                    inline for (meta.field_names, meta.unions, meta.union_types) |nm, un, un_ty| {
+                        inline for (un.fields) |f| {
+                            if (f.type != @TypeOf(val)) continue;
+                            for (@field(self.storage, nm).items, 0..) |item, i| {
+                                if (std.meta.eql(val, @field(item, f.name))) return .{ .tag = tag, .index = @intCast(i) };
+                            }
+                            var v = @unionInit(un_ty, f.name, val);
+                            try @field(self.storage, nm).append(alloc, v);
+                            return .{ .tag = tag, .index = @intCast(@field(self.storage, nm).items.len - 1) };
+                        }
+                    }
+                },
+            }
+
+            unreachable;
         }
 
         pub fn get(self: *const Self, id: Index) T {
             switch (id.tag) {
                 inline else => |tag| {
+                    if (Index.decodeStatic(T, tag, id.index)) |val| return val;
+
                     const field = @typeInfo(T).Union.fields[@intFromEnum(tag)];
-
-                    if (@sizeOf(field.type) == 0) {
-                        return @unionInit(T, field.name, {});
-                    }
-
-                    if (comptime isInlined(@TypeOf(tag), field.type)) {
-                        const Int = std.meta.Int(.unsigned, @bitSizeOf(field.type));
-                        return @unionInit(T, field.name, @bitCast(@as(Int, @intCast(id.index))));
-                    }
-
                     inline for (meta.field_names, meta.unions) |nm, un| {
                         inline for (un.fields) |f| {
                             if (f.type == field.type) {
@@ -210,21 +274,16 @@ pub fn Unmanaged(comptime T: type) type {
                     }
                 },
             }
+
+            unreachable;
         }
 
         pub fn get_ptr(self: *Self, id: Index) AsPtr {
             switch (id.tag) {
                 inline else => |tag| {
+                    if (Index.decodeStatic(AsPtr, tag, id.index)) |val| return val;
+
                     const field = @typeInfo(T).Union.fields[@intFromEnum(tag)];
-
-                    if (@sizeOf(field.type) == 0) {
-                        return @unionInit(AsPtr, field.name, {});
-                    }
-
-                    if (comptime isInlined(@TypeOf(tag), field.type)) {
-                        const Int = std.meta.Int(.unsigned, @bitSizeOf(field.type));
-                        return @unionInit(AsPtr, field.name, @bitCast(@as(Int, @intCast(id.index))));
-                    }
 
                     inline for (meta.field_names, meta.unions) |nm, un| {
                         inline for (un.fields) |f| {
@@ -235,6 +294,8 @@ pub fn Unmanaged(comptime T: type) type {
                     }
                 },
             }
+
+            unreachable;
         }
     };
 }
@@ -281,14 +342,14 @@ pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
             inline for (meta.field_names) |nm| @field(self.storage, nm).deinit(alloc);
         }
 
-        pub fn at(self: *Self, id: meta.index) *T {
+        pub fn at(self: *Self, id: meta.index) ?*T {
             return switch (id.tag) {
                 inline else => |tag| self.dispatch(@intFromEnum(tag), id.index),
             };
         }
 
-        fn dispatch(self: *Self, comptime tag: usize, index: usize) *T {
-            const i = meta.omited_field_lookup[tag] orelse @panic("the requested enum is inlined or zero size");
+        fn dispatch(self: *Self, comptime tag: usize, index: usize) ?*T {
+            const i = meta.omited_field_lookup[tag] orelse return null;
             const store = &@field(self.storage, meta.field_names[i]);
             return &store.items[index];
         }
@@ -337,5 +398,5 @@ test "sanity" {
     var shadow = try Shadow.init(&ctnr, std.testing.allocator);
     defer shadow.deinit(std.testing.allocator);
 
-    shadow.at(id2).* = 1;
+    shadow.at(id2).?.* = 1;
 }

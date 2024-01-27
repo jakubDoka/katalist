@@ -1,8 +1,9 @@
 const std = @import("std");
 const Lexer = @import("Lexer.zig");
 const EnumList = @import("EnumList.zig");
-const BuiltinType = @import("TypeCheck.zig").Type.Builtin;
+const Type = @import("TypeCheck.zig").Type;
 const maxIdentLen = @import("Ident.zig").cap;
+const garbage = @import("garbage.zig");
 const Self = @This();
 
 fn cloneSlice(comptime T: type, allocator: std.mem.Allocator, slice: []const T) ![]T {
@@ -12,7 +13,7 @@ fn cloneSlice(comptime T: type, allocator: std.mem.Allocator, slice: []const T) 
 }
 
 pub const Ast = struct {
-    const Ident = packed struct(u32) {
+    pub const Ident = packed struct(u32) {
         resolved: bool = false,
         len: u6 = 0,
         offset: u25 = 0,
@@ -72,6 +73,7 @@ pub const Ast = struct {
         Block,
         Ret,
         BuiltinType,
+        Underscore,
     };
 
     pub const Expr = union(ExprTag) {
@@ -124,6 +126,7 @@ pub const Ast = struct {
         };
 
         pub const Var = struct {
+            is_const: bool,
             name: Ident,
             init: Expr.Id,
         };
@@ -144,7 +147,8 @@ pub const Ast = struct {
         Item: Item.Id,
         Block: Block,
         Ret: Expr.Id,
-        BuiltinType: BuiltinType,
+        BuiltinType: Type.Builtin,
+        Underscore,
 
         pub fn clone(self: *const Expr, alloc: std.mem.Allocator) !Expr {
             return switch (self.*) {
@@ -266,6 +270,7 @@ pub fn Printer(comptime W: type) type {
                 .Ret => |s| try self.printRet(s),
                 .BuiltinType => |s| try s.print(self.writer),
                 .Call => |s| try self.printCall(s),
+                .Underscore => try self.writer.writeByte('_'),
                 else => try self.writer.print("{any}", .{expr}),
             };
         }
@@ -510,8 +515,10 @@ fn parseUnitExpr(self: *Self) Error!Ast.Expr.Id {
     var token = self.advance();
     var unit: Ast.Expr = switch (token.kind) {
         .Ident => .{ .Ident = try self.scope.dispatch(token.source, self.lexer.source) },
+        .Underscore => .{ .Underscore = {} },
         .KeyVoid => .{ .BuiltinType = .Void },
-        .KeyUsize => .{ .BuiltinType = .{ .Int = .{ .signed = false, .bit_width = 64 } } },
+        .KeyUsize => .{ .BuiltinType = .{ .Int = Type.Int.Usize } },
+        .KeyIsize => .{ .BuiltinType = .{ .Int = Type.Int.Isize } },
         .Int, .Uint => .{ .BuiltinType = .{ .Int = .{
             .signed = token.kind == .Int,
             .bit_width = std.fmt.parseInt(u15, token.source[1..], 10) catch unreachable,
@@ -527,9 +534,9 @@ fn parseUnitExpr(self: *Self) Error!Ast.Expr.Id {
             .op = .Neg,
             .expr = try self.parseUnitExpr(),
         } },
-        .KeyRet => .{ .Ret = try self.parseExpr() },
-        .KeyLet => .{ .Var = try self.parseVar() },
-        else => return self.failExpect(token, &.{ .Ident, .Number, .Sub, .KeyRet }),
+        .KeyReturn => .{ .Ret = try self.parseExpr() },
+        .KeyVar, .KeyConst => .{ .Var = try self.parseVar(token.kind == .KeyConst) },
+        else => return self.failExpect(token, &.{ .Ident, .Number, .Sub, .KeyReturn }),
     };
 
     while (true) {
@@ -540,7 +547,7 @@ fn parseUnitExpr(self: *Self) Error!Ast.Expr.Id {
     }
 }
 
-fn parseVar(self: *Self) Error!Ast.Expr.Var {
+fn parseVar(self: *Self, is_const: bool) Error!Ast.Expr.Var {
     var ident = try self.expectAdvance(.Ident);
     const name = try self.scope.add(ident.source, self.lexer.source);
 
@@ -548,6 +555,7 @@ fn parseVar(self: *Self) Error!Ast.Expr.Var {
     const init = try self.parseExpr();
 
     return .{
+        .is_const = is_const,
         .name = name,
         .init = init,
     };
@@ -633,26 +641,26 @@ test {
     std.testing.refAllDeclsRecursive(Self);
 
     const src =
-        \\fn main() usize { ret 1 + 2; }
+        \\fn main() usize { return 1 + 2; }
         \\fn assign(a: u8, b: u8) void { a = b + 2; }
         \\fn bull(a: i3, b: i3) void { a + b = 2; }
-        \\fn call_main() usize { ret main(2) + 1; }
-        \\fn variables() u64 { let a = 1; let b = 2; ret a + b; }
+        \\fn call_main() usize { return main(2) + 1; }
+        \\fn variables() u64 { const a = 1; const b = 2; return a + b; }
         \\fn more_math() usize {
-        \\    let foo = 0;
-        \\    let goo = 2;
-        \\    let soo = 5;
-        \\    let sub = foo + goo + loo;
-        \\    ret foo - goo = sub;
+        \\    const foo = 0;
+        \\    const goo = 2;
+        \\    const soo = 5;
+        \\    const sub = foo + goo + soo;
+        \\    return foo - goo = sub;
         \\}
     ;
 
-    var alloc = CountingAllocator.init(std.testing.allocator);
+    var alloc = garbage.CountingAllocator.init(std.testing.allocator);
 
     var now = try std.time.Instant.now();
     var ast = try Self.parse(alloc.allocator(), src);
     var elapsed = (try std.time.Instant.now()).since(now);
-    std.log.err("elapsed: {d}ns, expansion ratio: {any}", .{ elapsed, @as(f32, @floatFromInt(alloc.count_total)) / @as(f32, @floatFromInt(src.len)) });
+    std.log.info("elapsed: {d}ns, expansion ratio: {any}", .{ elapsed, @as(f32, @floatFromInt(alloc.count_total)) / @as(f32, @floatFromInt(src.len)) });
     alloc.print();
 
     defer ast.deinit(alloc.allocator());
@@ -669,93 +677,5 @@ test {
     var printer = Printer(@TypeOf(writer)).init(&ast, writer, src);
     try printer.print();
 
-    std.log.err("{s}", .{arr});
+    std.log.info("{s}", .{arr});
 }
-
-const CountingAllocator = struct {
-    child_allocator: std.mem.Allocator,
-    count_active: u64,
-    count_total: u64,
-    count_allocs: u64,
-    count_allocs_success: u64,
-    count_resizes: u64,
-    count_frees: u64,
-
-    const extras = struct {
-        pub fn ptrCast(comptime T: type, ptr: *anyopaque) *T {
-            return @as(*T, @ptrCast(@alignCast(ptr)));
-        }
-    };
-
-    pub fn print(self: *CountingAllocator) void {
-        std.log.err("active: {d} total: {d} allocs: {d} success: {d} resizes: {d} frees: {d}", .{
-            self.count_active,
-            self.count_total,
-            self.count_allocs,
-            self.count_allocs_success,
-            self.count_resizes,
-            self.count_frees,
-        });
-    }
-
-    pub fn init(child_allocator: std.mem.Allocator) CountingAllocator {
-        return .{
-            .child_allocator = child_allocator,
-            .count_active = 0,
-            .count_total = 0,
-            .count_allocs = 0,
-            .count_allocs_success = 0,
-            .count_resizes = 0,
-            .count_frees = 0,
-        };
-    }
-
-    pub fn allocator(self: *CountingAllocator) std.mem.Allocator {
-        return .{
-            .ptr = self,
-            .vtable = &.{
-                .alloc = alloc,
-                .resize = resize,
-                .free = free,
-            },
-        };
-    }
-
-    fn alloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
-        var self = extras.ptrCast(CountingAllocator, ctx);
-        self.count_allocs += 1;
-        const ptr = self.child_allocator.rawAlloc(len, ptr_align, ret_addr) orelse return null;
-        self.count_allocs_success += 1;
-        self.count_active += len;
-        self.count_total += len;
-        return ptr;
-    }
-
-    fn resize(ctx: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret_addr: usize) bool {
-        var self = extras.ptrCast(CountingAllocator, ctx);
-        self.count_resizes += 1;
-        const old_len = buf.len;
-        const stable = self.child_allocator.rawResize(buf, buf_align, new_len, ret_addr);
-        if (stable) {
-            if (new_len > old_len) {
-                self.count_active += new_len;
-                self.count_active -= old_len;
-                self.count_total += new_len;
-                self.count_total -= old_len;
-            } else {
-                self.count_active -= old_len;
-                self.count_active += new_len;
-                self.count_total -= old_len;
-                self.count_total += new_len;
-            }
-        }
-        return stable;
-    }
-
-    fn free(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
-        var self = extras.ptrCast(CountingAllocator, ctx);
-        self.count_frees += 1;
-        self.count_active -= buf.len;
-        return self.child_allocator.rawFree(buf, buf_align, ret_addr);
-    }
-};
