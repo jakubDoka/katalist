@@ -4,7 +4,7 @@ const EnumList = @import("EnumList.zig");
 const Ident = @import("Ident.zig");
 const Lexer = @import("Lexer.zig");
 const Parser = @import("Parser.zig");
-const TypeCheck = @import("TypeCheck.zig");
+const TypeCheck = @import("Typechk.zig");
 const Codegen = @import("Codegen.zig");
 
 pub fn main() !void {

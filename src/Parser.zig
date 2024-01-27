@@ -1,7 +1,7 @@
 const std = @import("std");
 const Lexer = @import("Lexer.zig");
 const EnumList = @import("EnumList.zig");
-const Type = @import("TypeCheck.zig").Type;
+const Type = @import("Typechk.zig").Type;
 const maxIdentLen = @import("Ident.zig").cap;
 const garbage = @import("garbage.zig");
 const Self = @This();
@@ -147,7 +147,7 @@ pub const Ast = struct {
         Item: Item.Id,
         Block: Block,
         Ret: Expr.Id,
-        BuiltinType: Type.Builtin,
+        BuiltinType: Type.Builtin.Compact,
         Underscore,
 
         pub fn clone(self: *const Expr, alloc: std.mem.Allocator) !Expr {
@@ -268,7 +268,7 @@ pub fn Printer(comptime W: type) type {
                 .Binary => |s| try self.printBinary(s),
                 .Var => |s| try self.printVar(s),
                 .Ret => |s| try self.printRet(s),
-                .BuiltinType => |s| try s.print(self.writer),
+                .BuiltinType => |s| try Type.Builtin.expand(s).print(self.writer),
                 .Call => |s| try self.printCall(s),
                 .Underscore => try self.writer.writeByte('_'),
                 else => try self.writer.print("{any}", .{expr}),
@@ -512,17 +512,18 @@ fn parseExprPrec(self: *Self, prec: u8, initial: Ast.Expr.Id) Error!Ast.Expr.Id 
 }
 
 fn parseUnitExpr(self: *Self) Error!Ast.Expr.Id {
+    const compact = Type.Builtin.compact;
     var token = self.advance();
     var unit: Ast.Expr = switch (token.kind) {
         .Ident => .{ .Ident = try self.scope.dispatch(token.source, self.lexer.source) },
         .Underscore => .{ .Underscore = {} },
-        .KeyVoid => .{ .BuiltinType = .Void },
-        .KeyUsize => .{ .BuiltinType = .{ .Int = Type.Int.Usize } },
-        .KeyIsize => .{ .BuiltinType = .{ .Int = Type.Int.Isize } },
-        .Int, .Uint => .{ .BuiltinType = .{ .Int = .{
+        .KeyVoid => .{ .BuiltinType = compact(.Void) },
+        .KeyUsize => .{ .BuiltinType = compact(.{ .Int = Type.Int.Usize }) },
+        .KeyIsize => .{ .BuiltinType = compact(.{ .Int = Type.Int.Isize }) },
+        .Int, .Uint => .{ .BuiltinType = compact(.{ .Int = .{
             .signed = token.kind == .Int,
             .bit_width = std.fmt.parseInt(u15, token.source[1..], 10) catch unreachable,
-        } } },
+        } }) },
         .Number => .{ .Int = std.fmt.parseInt(u64, token.source, 10) catch |err| b: {
             try self.addError(.{ .InvalidNumber = .{
                 .err = err,

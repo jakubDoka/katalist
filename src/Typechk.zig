@@ -10,29 +10,28 @@ pub const TypeKind = enum {
     Int,
     Void,
     Type,
-    Func,
-    Pointer,
 };
 
 pub const Type = union(TypeKind) {
     pub const Store = EnumList.Unmanaged(Type);
     pub const Id = EnumList.Id(TypeKind);
+
     pub const type_lit = Type.encode(.Type).?;
     pub const void_lit = Type.encode(.Void).?;
     pub const ctint_lit = Type.encode(.{ .Int = Int.Ctint }).?;
+    pub const usize_lit = Type.encode(.{ .Int = Int.Usize }).?;
+    pub const maxIntWidth: u15 = ~@as(u15, 0) - std.meta.fields(Builtin).len + 1;
 
     pub const Int = packed struct(u16) {
-        pub const Usize = Int{ .signed = false, .bit_width = 64 };
+        pub const Usize = Int{ .bit_width = 64 };
         pub const Isize = Int{ .signed = true, .bit_width = 64 };
-        pub const Ctint = Int{ .signed = true, .bit_width = ~@as(u15, 0) };
+        pub const Ctint = Int{ .signed = true, .bit_width = maxIntWidth };
 
-        signed: bool,
+        signed: bool = false,
         bit_width: u15,
 
         pub fn parse(str: []const u8) ?Int {
             if (str.len < 2) return null;
-
-            if (std.mem.eql(u8, str, "usize")) return .{ .signed = false, .bit_width = 64 };
 
             const sign = switch (str[0]) {
                 'u' => true,
@@ -51,14 +50,16 @@ pub const Type = union(TypeKind) {
         }
 
         pub fn isCt(self: Int) bool {
-            return self.bit_width == ~@as(u15, 0);
+            return self.bit_width == Ctint.bit_width;
         }
     };
 
     pub const Builtin = union(enum) {
-        Int: Int,
+        pub const Compact = u16;
+
         Void,
         Type,
+        Int: Int,
 
         pub fn print(self: Builtin, writer: anytype) !void {
             switch (self) {
@@ -75,6 +76,22 @@ pub const Type = union(TypeKind) {
                 .Type => .Type,
             }).?;
         }
+
+        pub fn compact(self: Builtin) Compact {
+            return switch (self) {
+                .Int => |i| @bitCast(i),
+                inline else => |_, tag| maxIntWidth + @as(Compact, @intFromEnum(tag)),
+            };
+        }
+
+        pub fn expand(self: Compact) Builtin {
+            if (self < maxIntWidth) return .{ .Int = @bitCast(self) };
+            const Tag = std.meta.Tag(Builtin);
+            return switch (@as(Tag, @enumFromInt(@as(Compact, self - maxIntWidth)))) {
+                .Int => .{ .Int = @bitCast(self) },
+                inline else => |tag| @unionInit(Builtin, @tagName(tag), {}),
+            };
+        }
     };
 
     pub const Func = struct {
@@ -85,8 +102,6 @@ pub const Type = union(TypeKind) {
     Int: Int,
     Void,
     Type,
-    Func: Func,
-    Pointer: Id,
 
     pub fn encode(self: Type) ?Id {
         return Id.encode(self);
@@ -112,12 +127,13 @@ pub const Type = union(TypeKind) {
 };
 
 pub const Value = struct {
-    const void_lit = Value{};
+    pub const void_lit = Value{};
 
     type: Type.Id = Type.void_lit,
     is_runtime: bool = false,
     is_mutable: bool = false,
-    value: union {
+    data: union {
+        index: usize,
         int: u64,
         pointer: *Value,
         type: Type.Id,
@@ -127,7 +143,7 @@ pub const Value = struct {
     pub fn ty(typ: Type.Id) Value {
         return .{
             .type = Type.type_lit,
-            .value = .{ .type = typ },
+            .data = .{ .type = typ },
         };
     }
 
@@ -143,32 +159,53 @@ pub const Value = struct {
         if (!self.is_mutable) return self;
         return .{
             .type = self.type,
-            .value = self.value.pointer.*.value,
+            .data = self.data.pointer.*.data,
         };
+    }
+
+    pub fn fromInlineAst(builtin: Ast.Expr.Id) ?Value {
+        const ia = Ast.Expr.Id.decode(Ast.Expr, builtin) orelse return null;
+        switch (ia) {
+            .BuiltinType => |b| return ty(Type.Builtin.expand(b).asType()),
+            else => return null,
+        }
     }
 };
 
 pub const Module = struct {
     const AstStore = EnumList.ShadowUnmanaged(Value, Parser.Ast.Expr.Store);
 
+    const Func = struct {
+        peak_slot_count: usize,
+    };
+
     store: Type.Store,
     ast: AstStore,
+    funcs: []Func = &.{},
 
-    pub fn init(ast: *const Parser.Ast, alloc: std.mem.Allocator) !Module {
+    pub fn init(alloc: std.mem.Allocator, ast: *const Parser.Ast) !Module {
+        var func_count: usize = 0;
+        for (ast.items.items) |item| func_count += @intFromBool(item.tag == .Func);
+
         return .{
             .store = Type.Store.init(),
             .ast = try AstStore.init(&ast.expr_store, alloc),
+            .funcs = try alloc.alloc(Func, func_count),
         };
     }
 
     pub fn deinit(self: *Module, alloc: std.mem.Allocator) void {
         self.store.deinit(alloc);
         self.ast.deinit(alloc);
+        alloc.free(self.funcs);
     }
 };
 
 const Scope = struct {
-    pub const Frame = usize;
+    pub const Frame = struct {
+        total: usize,
+    };
+
     pub const Symbol = struct {
         ident: Ast.Ident,
         is_mutable: bool = false,
@@ -177,6 +214,7 @@ const Scope = struct {
 
     alloc: std.mem.Allocator,
     symbols: std.SegmentedList(Symbol, 8),
+    max_stack: usize = 0,
     ret: ?Type.Id = null,
     ret_value: ?Value = null,
 
@@ -192,7 +230,27 @@ const Scope = struct {
     }
 
     pub fn add(self: *Scope, sym: Symbol) Error!void {
+        var final_sym = sym;
+        if (sym.value.is_runtime) final_sym.value.data = .{ .index = self.symbols.len };
         (try self.symbols.addOne(self.alloc)).* = sym;
+    }
+
+    pub fn makeRt(self: *Scope, value: *Value) void {
+        if (value.is_runtime) return;
+        const index = self.indexOf(value) orelse unreachable;
+        value.is_runtime = true;
+        value.data.index = index;
+    }
+
+    pub fn indexOf(self: *Scope, value: *Value) ?usize {
+        for (0..self.symbols.dynamic_segments.len) |ri| {
+            const i = self.symbols.dynamic_segments.len - ri - 1;
+            const seg = self.symbols.dynamic_segments[i];
+            const pos: usize = @intFromPtr(seg);
+            if (pos > value.index or value.index >= pos + @as(usize, 1) << i) continue;
+            return i + @as(usize, @intFromPtr(seg));
+        }
+        return null;
     }
 
     pub fn find(self: *Scope, ident: Ast.Ident) ?*Symbol {
@@ -204,11 +262,20 @@ const Scope = struct {
     }
 
     pub fn pushFrame(self: *Scope) Frame {
-        return self.symbols.len;
+        return .{
+            .total = self.symbols.len,
+        };
     }
 
     pub fn popFrame(self: *Scope, frame: Frame) void {
-        self.symbols.len = frame;
+        self.max_stack = @max(self.max_stack, self.symbols.len);
+        self.symbols.len = frame.total;
+    }
+
+    pub fn clear(self: *Scope) usize {
+        std.debug.assert(self.symbols.len == 0);
+        defer self.max_stack = 0;
+        return self.max_stack;
     }
 };
 
@@ -223,8 +290,8 @@ ast: *const Parser.Ast,
 types: *Module,
 scope: *Scope,
 
-pub fn typechk(ast: *const Parser.Ast, alloc: std.mem.Allocator) Error!Module {
-    var types = try Module.init(ast, alloc);
+pub fn typecheck(alloc: std.mem.Allocator, ast: *const Parser.Ast) Error!Module {
+    var types = try Module.init(alloc, ast);
     var scratch = std.heap.ArenaAllocator.init(alloc);
     defer scratch.deinit();
     var scope = Scope.init(alloc);
@@ -246,31 +313,33 @@ pub fn typechk(ast: *const Parser.Ast, alloc: std.mem.Allocator) Error!Module {
 fn typechkFile(self: *Self) Error!void {
     for (self.ast.items.items) |item| {
         switch (self.ast.item_store.get(item)) {
-            .Func => |f| try self.typechkFunc(f),
+            .Func => |f| try self.typechkFunc(f, item.index),
         }
     }
 }
 
-fn typechkFunc(self: *Self, func: Parser.Ast.Item.Func) Error!void {
+fn typechkFunc(self: *Self, func: Ast.Item.Func, id: usize) Error!void {
     const frame = self.scope.pushFrame();
     for (func.params) |param| {
         const value = self.typechkExpr(Type.type_lit, param.type) catch @panic("todo");
-        try self.scope.add(.{ .ident = param.name, .value = Value.rt(value.value.type) });
+        try self.scope.add(.{ .ident = param.name, .value = Value.rt(value.data.type) });
     }
 
     const ret = self.typechkExpr(Type.type_lit, func.ret) catch @panic("todo");
-    self.scope.ret = ret.value.type;
+    self.scope.ret = ret.data.type;
     self.typechkBlock(func.body) catch |e| switch (e) {
         InnerError.Returned => {},
         else => |er| return er,
     };
     self.scope.popFrame(frame);
+
+    self.types.funcs[id] = .{ .peak_slot_count = self.scope.clear() };
 }
 
 fn typechkExpr(self: *Self, expected: ?Type.Id, expr: Parser.Ast.Expr.Id) InnerError!Value {
     const val = switch (self.ast.expr_store.get(expr)) {
-        .BuiltinType => |b| Value.ty(b.asType()),
-        .Int => |i| Value{ .type = Type.ctint_lit, .value = .{ .int = i } },
+        .BuiltinType => |b| Value.ty(Type.Builtin.expand(b).asType()),
+        .Int => |i| Value{ .type = Type.ctint_lit, .data = .{ .int = i } },
         .Ret => |r| {
             const ret = self.scope.ret orelse @panic("todo");
             if (self.scope.ret_value) |*v| v.is_runtime = true else {
@@ -286,9 +355,11 @@ fn typechkExpr(self: *Self, expected: ?Type.Id, expr: Parser.Ast.Expr.Id) InnerE
 
                 if (lhs.is_runtime or rhs.is_runtime) break :b Value.rt(ty);
 
+                const lhs_val = lhs.ensureLoaded().data;
+                const rhs_val = rhs.ensureLoaded().data;
                 break :b switch (o.op) {
-                    .Add => Value{ .type = ty, .value = .{ .int = lhs.value.int + rhs.value.int } },
-                    .Sub => Value{ .type = ty, .value = .{ .int = lhs.value.int - rhs.value.int } },
+                    .Add => Value{ .type = ty, .data = .{ .int = lhs_val.int + rhs_val.int } },
+                    .Sub => Value{ .type = ty, .data = .{ .int = lhs_val.int - rhs_val.int } },
                     else => unreachable,
                 };
             },
@@ -302,8 +373,8 @@ fn typechkExpr(self: *Self, expected: ?Type.Id, expr: Parser.Ast.Expr.Id) InnerE
                 const rhs = try self.typechkExpr(lhs.type, o.rhs);
 
                 if (!lhs.is_mutable) @panic("todo");
-                if (!lhs.is_runtime and rhs.is_runtime) lhs.value.pointer.is_runtime = true;
-                if (!lhs.is_runtime or !rhs.is_runtime) lhs.value.pointer.* = rhs.ensureLoaded();
+                if (!lhs.is_runtime and rhs.is_runtime) lhs.data.pointer.is_runtime = true;
+                if (!lhs.is_runtime and !rhs.is_runtime) lhs.data.pointer.* = rhs.ensureLoaded();
 
                 break :b Value{};
             },
@@ -312,7 +383,7 @@ fn typechkExpr(self: *Self, expected: ?Type.Id, expr: Parser.Ast.Expr.Id) InnerE
             const sym = self.scope.find(i) orelse @panic("todo");
             if (sym.value.is_runtime) break :b sym.value;
             if (!sym.is_mutable) break :b sym.value;
-            break :b Value{ .type = sym.value.type, .is_mutable = true, .value = .{ .pointer = &sym.value } };
+            break :b Value{ .type = sym.value.type, .is_mutable = true, .data = .{ .pointer = &sym.value } };
         },
         .Var => |v| b: {
             const value = try self.typechkExpr(null, v.init);
@@ -348,6 +419,7 @@ test "sanity" {
         \\    var foo = 1 + 1;
         \\    _ = 1;
         \\    foo = 2;
+        \\    foo = a;
         \\    return a + b + foo;
         \\}
     ;
@@ -360,7 +432,7 @@ test "sanity" {
     for (ast.errors.items) |err| std.log.warn("{any}", .{err});
     try std.testing.expect(ast.errors.items.len == 0);
 
-    var types = try typechk(&ast, alloc);
+    var types = try typecheck(alloc, &ast);
     defer types.deinit(alloc);
 }
 

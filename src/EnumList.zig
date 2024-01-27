@@ -348,10 +348,20 @@ pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
             };
         }
 
+        pub fn get(self: *const Self, id: meta.index) ?T {
+            return switch (id.tag) {
+                inline else => |tag| self.dispatch_get(@intFromEnum(tag), id.index),
+            };
+        }
+
+        fn dispatch_get(self: *const Self, comptime tag: usize, index: usize) ?T {
+            const i = meta.omited_field_lookup[tag] orelse return null;
+            return @field(self.storage, meta.field_names[i]).items[index];
+        }
+
         fn dispatch(self: *Self, comptime tag: usize, index: usize) ?*T {
             const i = meta.omited_field_lookup[tag] orelse return null;
-            const store = &@field(self.storage, meta.field_names[i]);
-            return &store.items[index];
+            return &@field(self.storage, meta.field_names[i]).items[index];
         }
     };
 }
