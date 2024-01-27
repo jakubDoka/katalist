@@ -199,6 +199,10 @@ pub const Module = struct {
         self.ast.deinit(alloc);
         alloc.free(self.funcs);
     }
+
+    pub fn getValue(self: *const Module, expr: Parser.Ast.Expr.Id) Value {
+        return self.ast.get(expr) orelse Value.fromInlineAst(expr).?;
+    }
 };
 
 const Scope = struct {

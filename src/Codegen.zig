@@ -100,20 +100,26 @@ const File = struct {
     }
 };
 
+pub const Stack = struct {
+    offset: u32, // from frame base
+};
+
+const Loc = union(enum) {
+    Reg: Reg,
+    Stack: Stack,
+    Comptime,
+};
+
+pub const Value = union(enum) {
+    Owned: Loc,
+    Borrowed: usize,
+    None,
+};
+
 const Scope = struct {
     pub const Frame = usize;
 
-    pub const Stack = struct {
-        offset: u32, // from frame base
-    };
-
     pub const Slot = struct {
-        const Loc = union(enum) {
-            Reg: Reg,
-            Stack: Stack,
-            Comptime,
-        };
-
         loc: Loc = .Comptime,
         type: Type.Id = Type.void_lit,
     };
@@ -204,28 +210,37 @@ fn gen(self: *Self) Error!void {
 }
 
 fn genFunc(self: *Self, func: Ast.Item.Func, label: File.Label) Error!void {
-    const ret = self.types.ast.get(func.ret) orelse Typechk.Value.fromInlineAst(func.ret).?;
-    const ret_type = ret.data.type;
+    const ret = self.types.getValue(func.ret).data.type;
 
     if (func.params.len > 0) @panic("TODO: function parameters");
-    if (!ret_type.eql(Type.usize_lit)) @panic("TODO: function return type");
+    if (!ret.eql(Type.usize_lit)) @panic("TODO: function return type");
 
-    self.scope.clear(ret_type);
+    self.scope.clear(ret);
     try self.file.writeLabel(label);
     try self.genBlock(func.body);
 }
 
-fn genBlock(self: *Self, block: Ast.Expr.Block) Error!void {
+fn genBlock(self: *Self, block: Ast.Expr.Block) Error!Value {
     const frame = self.scope.pushFrame();
-    for (block) |expr| try self.genExpr(self.ast.expr_store.get(expr));
+    for (block) |expr| _ = try self.genExpr(self.ast.expr_store.get(expr));
     self.scope.popFrame(frame);
 }
 
-fn genExpr(self: *Self, expr: Ast.Expr) Error!void {
-    _ = self;
+fn genExpr(self: *Self, expr: Ast.Expr) Error!Value {
     switch (expr) {
+        .Var => |v| try self.genVar(v),
         inline else => |v, t| std.debug.panic("TODO: {any} {any}", .{ t, v }),
     }
+}
+
+fn genVar(self: *Self, variable: Ast.Expr.Var) Error!void {
+    const value = self.types.getValue(variable.init);
+    if (!value.is_runtime) return;
+
+    const rt_value = self.genExpr(variable.init);
+    _ = rt_value;
+
+    unreachable;
 }
 
 fn allocLabel(self: *Self) File.Label {
