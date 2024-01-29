@@ -14,17 +14,21 @@ fn cloneSlice(comptime T: type, allocator: std.mem.Allocator, slice: []const T) 
 
 pub const Ast = struct {
     pub const Ident = packed struct(u32) {
-        resolved: bool = false,
+        last: bool = false,
         len: u6 = 0,
-        offset: u25 = 0,
+        offset: u25 = 0, // limits to 32 mib, should be enough
 
-        pub fn init(offset: usize, len: usize, resolved: bool) Ident {
+        pub fn init(offset: usize, len: usize) Ident {
             std.debug.assert(len <= maxIdentLen);
-            return .{ .len = @intCast(len), .offset = @intCast(offset), .resolved = resolved };
+            return .{ .len = @intCast(len), .offset = @intCast(offset) };
         }
 
         pub fn slice(self: Ident, src: []const u8) []const u8 {
             return src[self.offset..][0..self.len];
+        }
+
+        pub fn eql(self: Ident, other: Ident) bool {
+            return self.len == other.len and self.offset == other.offset;
         }
     };
 
@@ -128,6 +132,7 @@ pub const Ast = struct {
         pub const Var = struct {
             is_const: bool,
             name: Ident,
+            type: ?Expr.Id,
             init: Expr.Id,
         };
 
@@ -169,6 +174,10 @@ pub const Ast = struct {
             pos: usize,
         },
         UndeclaredIdent: struct {
+            ident: []const u8,
+            pos: usize,
+        },
+        UnusedSymbol: struct {
             ident: []const u8,
             pos: usize,
         },
@@ -215,11 +224,11 @@ pub fn Printer(comptime W: type) type {
         indent: usize,
         source: []const u8,
 
-        fn init(ast: *const Ast, writer: W, source: []const u8) PThis {
+        pub fn init(ast: *const Ast, writer: W, source: []const u8) PThis {
             return .{ .ast = ast, .writer = writer, .indent = 0, .source = source };
         }
 
-        fn print(self: *PThis) WriteError!void {
+        pub fn print(self: *PThis) WriteError!void {
             for (self.ast.items.items) |item| {
                 try self.printItem(item);
                 try self.writer.writeByte('\n');
@@ -322,10 +331,23 @@ const Error = error{ParsingFailed} || std.mem.Allocator.Error;
 const Scope = struct {
     pub const Frame = usize;
 
-    symbols: std.ArrayList(Ast.Ident),
+    pub const Sym = struct {
+        ident: Ast.Ident,
+        resolved: bool,
+        last_occurence: Occurence,
+    };
+
+    pub const Occurence = union(enum) {
+        Expr: Ast.Expr.Id,
+        Item,
+        Param,
+        Var,
+    };
+
+    symbols: std.ArrayList(Sym),
 
     pub fn init(allocator: std.mem.Allocator) Scope {
-        return .{ .symbols = std.ArrayList(Ast.Ident).init(allocator) };
+        return .{ .symbols = std.ArrayList(Sym).init(allocator) };
     }
 
     pub fn deinit(self: *Scope) void {
@@ -349,30 +371,31 @@ const Scope = struct {
         self.symbols.items.len = to_keep;
     }
 
-    pub fn add(self: *Scope, ident: []const u8, source: []const u8) !Ast.Ident {
-        return self.handleSym(ident, source, true);
+    pub fn add(self: *Scope, loc: Occurence, ident: []const u8, source: []const u8) !Ast.Ident {
+        return self.handleSym(loc, ident, source, true);
     }
 
-    pub fn dispatch(self: *Scope, ident: []const u8, source: []const u8) !Ast.Ident {
-        return self.handleSym(ident, source, false);
+    pub fn dispatch(self: *Scope, loc: Occurence, ident: []const u8, source: []const u8) !Ast.Ident {
+        return self.handleSym(loc, ident, source, false);
     }
 
-    fn handleSym(self: *Scope, ident: []const u8, source: []const u8, or_declare: bool) !Ast.Ident {
+    fn handleSym(self: *Scope, loc: Occurence, ident: []const u8, source: []const u8, or_declare: bool) !Ast.Ident {
         var i = self.symbols.items.len;
         while (i > 0) {
             i -= 1;
             const sym = &self.symbols.items[i];
-            if (sym.len != ident.len) continue;
+            if (sym.ident.len != ident.len) continue;
             if (sym.resolved and or_declare) continue;
-            if (std.mem.eql(u8, sym.slice(source), ident)) {
+            if (std.mem.eql(u8, sym.ident.slice(source), ident)) {
                 sym.resolved = sym.resolved or or_declare;
-                return sym.*;
+                sym.last_occurence = loc;
+                return sym.ident;
             }
         }
 
         const pos = @intFromPtr(ident.ptr) - @intFromPtr(source.ptr);
-        const sym = Ast.Ident.init(pos, ident.len, or_declare);
-        try self.symbols.append(sym);
+        const sym = Ast.Ident.init(pos, ident.len);
+        try self.symbols.append(.{ .ident = sym, .resolved = or_declare, .last_occurence = loc });
 
         return sym;
     }
@@ -409,15 +432,13 @@ pub fn parse(allocator: std.mem.Allocator, src: []const u8) Error!Ast {
         return err;
     };
 
-    scope.popFrame(0); // filter out dispatched symbols, leavin undefined symbols
+    try self.popFrame(0); // filter out dispatched symbols, leavin undefined symbols
 
     for (scope.symbols.items) |sym| {
-        if (!sym.resolved) {
-            try self.addError(.{ .UndeclaredIdent = .{
-                .ident = sym.slice(self.lexer.source),
-                .pos = sym.offset,
-            } });
-        }
+        try self.addError(.{ .UndeclaredIdent = .{
+            .ident = sym.ident.slice(self.lexer.source),
+            .pos = sym.ident.offset,
+        } });
     }
 
     return ast;
@@ -441,7 +462,7 @@ pub fn parseItem(self: *Self) Error!Ast.Item {
 
 pub fn parseFunction(self: *Self) Error!Ast.Item.Func {
     var ident = try self.expectAdvance(.Ident);
-    const name = try self.scope.add(ident.source, self.lexer.source);
+    const name = try self.scope.add(.Item, ident.source, self.lexer.source);
 
     const frame = self.scope.pushFrame();
 
@@ -450,7 +471,7 @@ pub fn parseFunction(self: *Self) Error!Ast.Item.Func {
     const ret = try self.parseExpr();
     const body = try self.parseBlock();
 
-    self.scope.popFrame(frame);
+    try self.popFrame(frame);
 
     return .{
         .name = name,
@@ -458,6 +479,26 @@ pub fn parseFunction(self: *Self) Error!Ast.Item.Func {
         .ret = ret,
         .body = body,
     };
+}
+
+fn popFrame(self: *Self, frame: Scope.Frame) !void {
+    for (self.scope.symbols.items[frame..]) |sym| {
+        switch (sym.last_occurence) {
+            .Expr => |e| switch (self.ast.expr_store.get_ptr(e)) {
+                .Ident => |i| i.last = true,
+                else => unreachable,
+            },
+            .Param, .Var => {
+                try self.ast.errors.append(self.alloc, .{ .UnusedSymbol = .{
+                    .ident = sym.ident.slice(self.lexer.source),
+                    .pos = sym.ident.offset,
+                } });
+            },
+            else => {},
+        }
+    }
+
+    self.scope.popFrame(frame);
 }
 
 fn parseBlock(self: *Self) Error!Ast.Expr.Block {
@@ -472,14 +513,14 @@ fn parseBlock(self: *Self) Error!Ast.Expr.Block {
         _ = try self.expectAdvance(.Semi);
     }
     _ = self.advance();
-    self.scope.popFrame(frame);
+    try self.popFrame(frame);
 
     return buf.items;
 }
 
 fn parseParam(self: *Self) Error!Ast.Item.Param {
     var ident = try self.expectAdvance(.Ident);
-    const name = try self.scope.add(ident.source, self.lexer.source);
+    const name = try self.scope.add(.Param, ident.source, self.lexer.source);
 
     _ = try self.expectAdvance(.Colon);
     const ty = try self.parseExpr();
@@ -515,7 +556,11 @@ fn parseUnitExpr(self: *Self) Error!Ast.Expr.Id {
     const compact = Type.Builtin.compact;
     var token = self.advance();
     var unit: Ast.Expr = switch (token.kind) {
-        .Ident => .{ .Ident = try self.scope.dispatch(token.source, self.lexer.source) },
+        .Ident => .{ .Ident = try self.scope.dispatch(
+            .{ .Expr = self.ast.expr_store.nextId(.Ident) },
+            token.source,
+            self.lexer.source,
+        ) },
         .Underscore => .{ .Underscore = {} },
         .KeyVoid => .{ .BuiltinType = compact(.Void) },
         .KeyUsize => .{ .BuiltinType = compact(.{ .Int = Type.Int.Usize }) },
@@ -550,14 +595,18 @@ fn parseUnitExpr(self: *Self) Error!Ast.Expr.Id {
 
 fn parseVar(self: *Self, is_const: bool) Error!Ast.Expr.Var {
     var ident = try self.expectAdvance(.Ident);
-    const name = try self.scope.add(ident.source, self.lexer.source);
+
+    var ty = if (self.tryAdvance(.Colon) != null) try self.parseUnitExpr() else null;
 
     _ = try self.expectAdvance(.Assign);
     const init = try self.parseExpr();
 
+    const name = try self.scope.add(.Var, ident.source, self.lexer.source);
+
     return .{
         .is_const = is_const,
         .name = name,
+        .type = ty,
         .init = init,
     };
 }
@@ -596,6 +645,14 @@ fn expectAdvance(self: *Self, comptime expected: Lexer.Token) Error!Lexer.TokenM
         return self.advance();
     } else {
         return self.failExpect(self.next_token, &.{expected});
+    }
+}
+
+fn tryAdvance(self: *Self, comptime expected: Lexer.Token) ?Lexer.TokenMeta {
+    if (self.next_token.kind == expected) {
+        return self.advance();
+    } else {
+        return null;
     }
 }
 

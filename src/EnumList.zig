@@ -297,6 +297,21 @@ pub fn Unmanaged(comptime T: type) type {
 
             unreachable;
         }
+
+        pub fn approxCountFor(self: *const Self, comptime D: type) usize {
+            inline for (meta.field_names, meta.unions) |nm, un| {
+                inline for (un.fields) |f| {
+                    if (f.type == D) {
+                        return @field(self.storage, nm).items.len;
+                    }
+                }
+            }
+        }
+
+        pub fn nextId(self: *const Self, comptime tag: std.meta.Tag(T)) Index {
+            const D = std.meta.fieldInfo(T, tag);
+            return .{ .tag = tag, .index = @intCast(self.approxCountFor(D.type)) };
+        }
     };
 }
 

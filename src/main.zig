@@ -6,6 +6,7 @@ const Lexer = @import("Lexer.zig");
 const Parser = @import("Parser.zig");
 const TypeCheck = @import("Typechk.zig");
 const Codegen = @import("Codegen.zig");
+const Ssa = @import("Ssa.zig");
 
 pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)

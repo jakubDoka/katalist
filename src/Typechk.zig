@@ -7,9 +7,10 @@ const Ast = Parser.Ast;
 const Self = @This();
 
 pub const TypeKind = enum {
-    Int,
     Void,
     Type,
+    Decl,
+    Int,
 };
 
 pub const Type = union(TypeKind) {
@@ -20,6 +21,7 @@ pub const Type = union(TypeKind) {
     pub const void_lit = Type.encode(.Void).?;
     pub const ctint_lit = Type.encode(.{ .Int = Int.Ctint }).?;
     pub const usize_lit = Type.encode(.{ .Int = Int.Usize }).?;
+    pub const decl_lit = Type.encode(.Decl).?;
     pub const maxIntWidth: u15 = ~@as(u15, 0) - std.meta.fields(Builtin).len + 1;
 
     pub const Int = packed struct(u16) {
@@ -59,6 +61,7 @@ pub const Type = union(TypeKind) {
 
         Void,
         Type,
+        Decl,
         Int: Int,
 
         pub fn print(self: Builtin, writer: anytype) !void {
@@ -66,6 +69,7 @@ pub const Type = union(TypeKind) {
                 .Int => |i| try i.print(writer),
                 .Void => try writer.writeAll("void"),
                 .Type => try writer.writeAll("type"),
+                .Decl => try writer.writeAll("decl"),
             }
         }
 
@@ -74,6 +78,7 @@ pub const Type = union(TypeKind) {
                 .Int => |i| .{ .Int = i },
                 .Void => .Void,
                 .Type => .Type,
+                .Decl => .Decl,
             }).?;
         }
 
@@ -99,9 +104,10 @@ pub const Type = union(TypeKind) {
         ret: Ast.Expr.Id,
     };
 
-    Int: Int,
     Void,
     Type,
+    Decl,
+    Int: Int,
 
     pub fn encode(self: Type) ?Id {
         return Id.encode(self);
@@ -127,18 +133,20 @@ pub const Type = union(TypeKind) {
 };
 
 pub const Value = struct {
+    pub const Data = union {
+        int: u64,
+        pointer: *Value,
+        type: Type.Id,
+        decl: Ast.Item.Id,
+        void: void,
+    };
+
     pub const void_lit = Value{};
 
     type: Type.Id = Type.void_lit,
     is_runtime: bool = false,
     is_mutable: bool = false,
-    data: union {
-        index: usize,
-        int: u64,
-        pointer: *Value,
-        type: Type.Id,
-        void: void,
-    } = .{ .void = {} },
+    data: Data = .{ .void = {} },
 
     pub fn ty(typ: Type.Id) Value {
         return .{
@@ -175,13 +183,11 @@ pub const Value = struct {
 pub const Module = struct {
     const AstStore = EnumList.ShadowUnmanaged(Value, Parser.Ast.Expr.Store);
 
-    const Func = struct {
-        peak_slot_count: usize,
-    };
-
     store: Type.Store,
     ast: AstStore,
-    funcs: []Func = &.{},
+    max_stack: usize = 0,
+    reached_functions: []Parser.Ast.Item.Id = &.{},
+    entry: ?usize = null,
 
     pub fn init(alloc: std.mem.Allocator, ast: *const Parser.Ast) !Module {
         var func_count: usize = 0;
@@ -190,14 +196,13 @@ pub const Module = struct {
         return .{
             .store = Type.Store.init(),
             .ast = try AstStore.init(&ast.expr_store, alloc),
-            .funcs = try alloc.alloc(Func, func_count),
         };
     }
 
     pub fn deinit(self: *Module, alloc: std.mem.Allocator) void {
         self.store.deinit(alloc);
         self.ast.deinit(alloc);
-        alloc.free(self.funcs);
+        alloc.free(self.reached_functions);
     }
 
     pub fn getValue(self: *const Module, expr: Parser.Ast.Expr.Id) Value {
@@ -223,20 +228,17 @@ const Scope = struct {
     ret_value: ?Value = null,
 
     pub fn init(alloc: std.mem.Allocator) Scope {
-        return .{
-            .alloc = alloc,
-            .symbols = .{},
-        };
+        return .{ .alloc = alloc, .symbols = .{} };
     }
 
     pub fn deinit(self: *Scope) void {
         self.symbols.deinit(self.alloc);
     }
 
-    pub fn add(self: *Scope, sym: Symbol) Error!void {
+    pub fn add(self: *Scope, sym: Symbol) Error!usize {
         var final_sym = sym;
-        if (sym.value.is_runtime) final_sym.value.data = .{ .index = self.symbols.len };
-        (try self.symbols.addOne(self.alloc)).* = sym;
+        (try self.symbols.addOne(self.alloc)).* = final_sym;
+        return self.symbols.len - 1;
     }
 
     pub fn makeRt(self: *Scope, value: *Value) void {
@@ -257,47 +259,48 @@ const Scope = struct {
         return null;
     }
 
-    pub fn find(self: *Scope, ident: Ast.Ident) ?*Symbol {
-        for (0..self.symbols.len) |i| {
-            const sym = self.symbols.at(self.symbols.len - i - 1);
-            if (std.meta.eql(sym.ident, ident)) return sym;
+    pub fn find(self: *Scope, ident: Ast.Ident) ?struct { loc: *Symbol, index: usize } {
+        for (0..self.symbols.len) |ri| {
+            const i = self.symbols.len - ri - 1;
+            const sym = self.symbols.at(i);
+            if (sym.ident.eql(ident)) return .{ .loc = sym, .index = i };
         }
         return null;
     }
 
     pub fn pushFrame(self: *Scope) Frame {
-        return .{
-            .total = self.symbols.len,
-        };
+        return .{ .total = self.symbols.len };
     }
 
     pub fn popFrame(self: *Scope, frame: Frame) void {
         self.max_stack = @max(self.max_stack, self.symbols.len);
         self.symbols.len = frame.total;
     }
+};
 
-    pub fn clear(self: *Scope) usize {
-        std.debug.assert(self.symbols.len == 0);
-        defer self.max_stack = 0;
-        return self.max_stack;
-    }
+const FuncFlags = packed struct {
+    computed_signature: bool = false,
+    computed_body: bool = false,
 };
 
 pub const Error = error{} || std.mem.Allocator.Error;
-const InnerError = error{
-    Returned,
-} || Error;
+const InnerError = error{Returned} || Error;
 
 alloc: std.mem.Allocator,
 scratch: *std.heap.ArenaAllocator,
 ast: *const Parser.Ast,
 types: *Module,
 scope: *Scope,
+to_check: std.ArrayList(Parser.Ast.Item.Id),
+func_set: []FuncFlags = &.{},
+source: []const u8,
 
-pub fn typecheck(alloc: std.mem.Allocator, ast: *const Parser.Ast) Error!Module {
+pub fn check(alloc: std.mem.Allocator, ast: *const Parser.Ast, source: []const u8) Error!Module {
     var types = try Module.init(alloc, ast);
+
     var scratch = std.heap.ArenaAllocator.init(alloc);
     defer scratch.deinit();
+
     var scope = Scope.init(alloc);
     defer scope.deinit();
 
@@ -307,105 +310,222 @@ pub fn typecheck(alloc: std.mem.Allocator, ast: *const Parser.Ast) Error!Module 
         .ast = ast,
         .types = &types,
         .scope = &scope,
+        .to_check = std.ArrayList(Parser.Ast.Item.Id).init(alloc),
+        .source = source,
     };
 
-    try self.typechkFile();
+    defer self.to_check.deinit();
+
+    try self.checkFile();
 
     return types;
 }
 
-fn typechkFile(self: *Self) Error!void {
+fn checkFile(self: *Self) Error!void {
     for (self.ast.items.items) |item| {
-        switch (self.ast.item_store.get(item)) {
-            .Func => |f| try self.typechkFunc(f, item.index),
+        const ident = switch (self.ast.item_store.get(item)) {
+            .Func => |f| f.name,
+        };
+
+        _ = try self.scope.add(.{
+            .ident = ident,
+            .value = Value{ .type = Type.decl_lit, .data = .{ .decl = item } },
+        });
+
+        if (std.mem.eql(u8, ident.slice(self.source), "main")) try self.to_check.append(item);
+    }
+
+    if (self.to_check.items.len == 0) @panic("todo");
+
+    self.func_set = try self.alloc.alloc(FuncFlags, self.scope.symbols.len);
+    for (self.func_set) |*f| f.* = .{};
+    defer self.alloc.free(self.func_set);
+
+    while (self.to_check.popOrNull()) |id| {
+        switch (self.ast.item_store.get(id)) {
+            .Func => |f| try self.checkFunc(f, id.index),
         }
     }
+
+    self.types.max_stack = self.scope.max_stack - self.scope.symbols.len;
+
+    var reached_function_count: usize = 0;
+    for (self.func_set) |f| reached_function_count += @intFromBool(f.computed_body);
+    self.types.reached_functions = try self.alloc.alloc(Parser.Ast.Item.Id, reached_function_count);
+
+    var i: usize = 0;
+    for (self.func_set, 0..) |f, j| if (f.computed_body) {
+        self.types.reached_functions[i] = .{ .tag = .Func, .index = @intCast(j) };
+        i += 1;
+    };
 }
 
-fn typechkFunc(self: *Self, func: Ast.Item.Func, id: usize) Error!void {
-    const frame = self.scope.pushFrame();
-    for (func.params) |param| {
-        const value = self.typechkExpr(Type.type_lit, param.type) catch @panic("todo");
-        try self.scope.add(.{ .ident = param.name, .value = Value.rt(value.data.type) });
+fn checkSignature(self: *Self, func: Ast.Item.Func, id: usize) InnerError!Value {
+    if (self.func_set[id].computed_signature) {
+        for (func.params) |param| {
+            const value = self.types.getValue(param.type);
+            _ = try self.scope.add(.{ .ident = param.name, .value = Value.rt(value.data.type) });
+        }
+        return self.types.getValue(func.ret);
     }
 
-    const ret = self.typechkExpr(Type.type_lit, func.ret) catch @panic("todo");
+    for (func.params) |param| {
+        const value = try self.checkExpr(Type.type_lit, param.type);
+        _ = try self.scope.add(.{ .ident = param.name, .value = Value.rt(value.data.type) });
+    }
+    const res = try self.checkExpr(Type.type_lit, func.ret);
+
+    try self.to_check.append(.{ .tag = .Func, .index = @intCast(id) });
+    self.func_set[id].computed_signature = true;
+    return res;
+}
+
+fn checkFunc(self: *Self, func: Ast.Item.Func, id: usize) Error!void {
+    const frame = self.scope.pushFrame();
+    const ret = self.checkSignature(func, id) catch |e| switch (e) {
+        InnerError.Returned => @panic("todo"),
+        else => |er| return er,
+    };
     self.scope.ret = ret.data.type;
-    self.typechkBlock(func.body) catch |e| switch (e) {
+    self.checkBlock(func.body) catch |e| switch (e) {
         InnerError.Returned => {},
         else => |er| return er,
     };
     self.scope.popFrame(frame);
 
-    self.types.funcs[id] = .{ .peak_slot_count = self.scope.clear() };
+    self.func_set[id].computed_body = true;
 }
 
-fn typechkExpr(self: *Self, expected: ?Type.Id, expr: Parser.Ast.Expr.Id) InnerError!Value {
-    const val = switch (self.ast.expr_store.get(expr)) {
+fn checkExpr(self: *Self, expected: ?Type.Id, expr: Parser.Ast.Expr.Id) InnerError!Value {
+    var val = switch (self.ast.expr_store.get(expr)) {
         .BuiltinType => |b| Value.ty(Type.Builtin.expand(b).asType()),
         .Int => |i| Value{ .type = Type.ctint_lit, .data = .{ .int = i } },
-        .Ret => |r| {
-            const ret = self.scope.ret orelse @panic("todo");
-            if (self.scope.ret_value) |*v| v.is_runtime = true else {
-                self.scope.ret_value = try self.typechkExpr(ret, r);
-            }
-            return InnerError.Returned;
-        },
-        .Binary => |o| switch (o.op) {
-            .Add, .Sub => b: {
-                const lhs = try self.typechkExpr(expected, o.lhs);
-                const rhs = try self.typechkExpr(lhs.type, o.rhs);
-                const ty = rhs.type;
-
-                if (lhs.is_runtime or rhs.is_runtime) break :b Value.rt(ty);
-
-                const lhs_val = lhs.ensureLoaded().data;
-                const rhs_val = rhs.ensureLoaded().data;
-                break :b switch (o.op) {
-                    .Add => Value{ .type = ty, .data = .{ .int = lhs_val.int + rhs_val.int } },
-                    .Sub => Value{ .type = ty, .data = .{ .int = lhs_val.int - rhs_val.int } },
-                    else => unreachable,
-                };
-            },
-            .Assign => b: {
-                if (o.lhs.tag == .Underscore) {
-                    _ = try self.typechkExpr(null, o.rhs);
-                    break :b Value{};
-                }
-
-                const lhs = try self.typechkExpr(null, o.lhs);
-                const rhs = try self.typechkExpr(lhs.type, o.rhs);
-
-                if (!lhs.is_mutable) @panic("todo");
-                if (!lhs.is_runtime and rhs.is_runtime) lhs.data.pointer.is_runtime = true;
-                if (!lhs.is_runtime and !rhs.is_runtime) lhs.data.pointer.* = rhs.ensureLoaded();
-
-                break :b Value{};
-            },
-        },
-        .Ident => |i| b: {
-            const sym = self.scope.find(i) orelse @panic("todo");
-            if (sym.value.is_runtime) break :b sym.value;
-            if (!sym.is_mutable) break :b sym.value;
-            break :b Value{ .type = sym.value.type, .is_mutable = true, .data = .{ .pointer = &sym.value } };
-        },
-        .Var => |v| b: {
-            const value = try self.typechkExpr(null, v.init);
-            try self.scope.add(.{ .ident = v.name, .is_mutable = !v.is_const, .value = value });
-            break :b Value.void_lit;
-        },
+        .Ret => |r| try self.checkRet(r),
+        .Binary => |o| try self.checkBinary(o),
+        .Ident => |i| try self.checkIdent(i),
+        .Var => |v| try self.checkVar(v),
+        .Call => |c| try self.checkCall(c),
         inline else => |val, tag| std.debug.panic("todo: {any} {any}", .{ tag, val }),
     };
 
-    if (expected) |e| if (Type.unify(e, val.type) == null) std.debug.panic("todo: {any} {any}", .{ e, val.type });
+    if (expected) |e| val.type = Type.unify(e, val.type) orelse
+        std.debug.panic("todo: {any} {any}", .{ e, val.type });
+
     if (self.types.ast.at(expr)) |slot| slot.* = val;
 
     return val;
 }
 
-fn typechkBlock(self: *Self, block: Parser.Ast.Expr.Block) InnerError!void {
+fn checkCall(self: *Self, c: Parser.Ast.Expr.Call) InnerError!Value {
+    const decl = (try self.checkExpr(Type.decl_lit, c.callee)).data.decl;
+
+    if (decl.tag != .Func) @panic("todo");
+    const func = self.ast.item_store.get(decl).Func;
+
     const frame = self.scope.pushFrame();
-    for (block) |stmt| _ = try self.typechkExpr(Type.void_lit, stmt);
+    const ret = (try self.checkSignature(func, decl.index)).data.type;
+    self.scope.popFrame(frame);
+
+    if (func.params.len != c.args.len) @panic("todo");
+
+    for (func.params, c.args) |param, arg| {
+        const param_type = self.types.getValue(param.type);
+        _ = try self.checkExpr(param_type.data.type, arg);
+    }
+
+    return Value.rt(ret);
+}
+
+fn checkVar(self: *Self, v: Parser.Ast.Expr.Var) InnerError!Value {
+    const ty = if (v.type) |t| (try self.checkExpr(Type.type_lit, t)).data.type else null;
+    var value = try self.checkExpr(ty, v.init);
+    value.is_runtime = !v.is_const;
+    if (value.type.eql(Type.ctint_lit) and value.is_runtime) @panic("todo");
+
+    _ = try self.scope.add(.{ .ident = v.name, .is_mutable = !v.is_const, .value = value });
+    return Value{ .is_runtime = value.is_runtime };
+}
+
+fn checkIdent(self: *Self, i: Parser.Ast.Ident) InnerError!Value {
+    var sym = self.scope.find(i) orelse std.debug.panic("todo: {s}", .{i.slice(self.source)});
+    if (!sym.loc.is_mutable) return sym.loc.value;
+    const data: Value.Data = if (sym.loc.value.is_runtime) .{ .void = {} } else .{ .pointer = &sym.loc.value };
+    return .{
+        .type = sym.loc.value.type,
+        .is_mutable = true,
+        .is_runtime = sym.loc.value.is_runtime,
+        .data = data,
+    };
+}
+
+fn checkRet(self: *Self, r: Parser.Ast.Expr.Id) InnerError!Value {
+    const ret = self.scope.ret orelse @panic("todo");
+    const value = try self.checkExpr(ret, r);
+
+    if (!value.is_runtime) if (self.types.ast.at(r)) |slot| {
+        slot.* = value.ensureLoaded();
+    };
+
+    if (self.scope.ret_value) |*v| v.is_runtime = true else {
+        self.scope.ret_value = value;
+    }
+
+    return InnerError.Returned;
+}
+
+fn checkBinary(self: *Self, b: Parser.Ast.Expr.Binary) InnerError!Value {
+    return switch (b.op) {
+        .Add, .Sub => try self.checkMathOp(b),
+        .Assign => try self.checkAssign(b),
+    };
+}
+
+fn checkMathOp(self: *Self, op: Parser.Ast.Expr.Binary) InnerError!Value {
+    const lhs = try self.checkExpr(null, op.lhs);
+    const rhs = try self.checkExpr(lhs.type, op.rhs);
+    const ty = rhs.type;
+
+    if (lhs.is_runtime or rhs.is_runtime) {
+        if (!lhs.type.eql(rhs.type))
+            (self.types.ast.at(op.lhs) orelse @panic("todo")).* = Value.rt(ty);
+        return Value.rt(ty);
+    }
+
+    const lhs_val = lhs.ensureLoaded().data;
+    const rhs_val = rhs.ensureLoaded().data;
+    return switch (op.op) {
+        .Add => Value{ .type = ty, .data = .{ .int = lhs_val.int + rhs_val.int } },
+        .Sub => Value{ .type = ty, .data = .{ .int = lhs_val.int - rhs_val.int } },
+        else => unreachable,
+    };
+}
+
+fn checkAssign(self: *Self, a: Parser.Ast.Expr.Binary) InnerError!Value {
+    if (a.lhs.tag == .Underscore) {
+        _ = try self.checkExpr(null, a.rhs);
+        return Value{};
+    }
+
+    const lhs = try self.checkExpr(null, a.lhs);
+    const rhs = try self.checkExpr(lhs.type, a.rhs);
+
+    if (!lhs.is_mutable) @panic("todo");
+    if (!lhs.is_runtime) if (rhs.is_runtime) {
+        lhs.data.pointer.is_runtime = true;
+        lhs.data.pointer.type = Type.unify(lhs.data.pointer.type, rhs.type) orelse @panic("todo");
+        return Value.rt(Type.void_lit);
+    } else {
+        lhs.data.pointer.* = rhs.ensureLoaded();
+    } else {
+        return Value.rt(Type.void_lit);
+    }
+
+    return Value{};
+}
+
+fn checkBlock(self: *Self, block: Parser.Ast.Expr.Block) InnerError!void {
+    const frame = self.scope.pushFrame();
+    for (block) |stmt| _ = try self.checkExpr(Type.void_lit, stmt);
     self.scope.popFrame(frame);
 }
 
@@ -419,8 +539,8 @@ fn addPtr(self: *Self, ty: Type.Id) !Type.Id {
 
 test "sanity" {
     const src =
-        \\fn foo(a: usize, b: usize) usize {
-        \\    var foo = 1 + 1;
+        \\fn main(a: usize, b: usize) usize {
+        \\    var foo: usize = 1 + 1;
         \\    _ = 1;
         \\    foo = 2;
         \\    foo = a;
@@ -436,7 +556,7 @@ test "sanity" {
     for (ast.errors.items) |err| std.log.warn("{any}", .{err});
     try std.testing.expect(ast.errors.items.len == 0);
 
-    var types = try typecheck(alloc, &ast);
+    var types = try check(alloc, &ast, src);
     defer types.deinit(alloc);
 }
 
