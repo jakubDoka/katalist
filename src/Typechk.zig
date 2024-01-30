@@ -10,6 +10,8 @@ pub const TypeKind = enum {
     Void,
     Type,
     Decl,
+    Bool,
+    Never,
     Int,
 };
 
@@ -19,6 +21,8 @@ pub const Type = union(TypeKind) {
 
     pub const type_lit = Type.encode(.Type).?;
     pub const void_lit = Type.encode(.Void).?;
+    pub const bool_lit = Type.encode(.Bool).?;
+    pub const never_lit = Type.encode(.Never).?;
     pub const ctint_lit = Type.encode(.{ .Int = Int.Ctint }).?;
     pub const usize_lit = Type.encode(.{ .Int = Int.Usize }).?;
     pub const decl_lit = Type.encode(.Decl).?;
@@ -62,23 +66,25 @@ pub const Type = union(TypeKind) {
         Void,
         Type,
         Decl,
+        Bool,
         Int: Int,
 
         pub fn print(self: Builtin, writer: anytype) !void {
             switch (self) {
                 .Int => |i| try i.print(writer),
-                .Void => try writer.writeAll("void"),
-                .Type => try writer.writeAll("type"),
-                .Decl => try writer.writeAll("decl"),
+                inline else => |_, tag| {
+                    const name = @tagName(tag);
+                    comptime var low_name: [name.len]u8 = undefined;
+                    inline for (&low_name, name) |*d, s| d.* = comptime std.ascii.toLower(s);
+                    try writer.writeAll(&low_name);
+                },
             }
         }
 
         pub fn asType(self: Builtin) Type.Id {
             return Type.encode(switch (self) {
                 .Int => |i| .{ .Int = i },
-                .Void => .Void,
-                .Type => .Type,
-                .Decl => .Decl,
+                inline else => |_, t| @unionInit(Type, @tagName(t), {}),
             }).?;
         }
 
@@ -107,6 +113,8 @@ pub const Type = union(TypeKind) {
     Void,
     Type,
     Decl,
+    Bool,
+    Never,
     Int: Int,
 
     pub fn encode(self: Type) ?Id {
@@ -123,6 +131,9 @@ pub const Type = union(TypeKind) {
         const a = decode(self) orelse return null;
         const b = decode(other) orelse return null;
 
+        if (a == .Never) return other;
+        if (b == .Never) return self;
+
         if (a == .Int and b == .Int) {
             if (a.Int.isCt()) return other;
             if (b.Int.isCt()) return self;
@@ -133,15 +144,17 @@ pub const Type = union(TypeKind) {
 };
 
 pub const Value = struct {
+    pub const void_lit = Value{};
+    pub const never_lit = Value{ .type = Type.never_lit };
+
     pub const Data = union {
         int: u64,
+        bool: bool,
         pointer: *Value,
         type: Type.Id,
         decl: Ast.Item.Id,
         void: void,
     };
-
-    pub const void_lit = Value{};
 
     type: Type.Id = Type.void_lit,
     is_runtime: bool = false,
@@ -167,7 +180,7 @@ pub const Value = struct {
         if (!self.is_mutable) return self;
         return .{
             .type = self.type,
-            .data = self.data.pointer.*.data,
+            .data = self.data.pointer.data,
         };
     }
 
@@ -175,6 +188,7 @@ pub const Value = struct {
         const ia = Ast.Expr.Id.decode(Ast.Expr, builtin) orelse return null;
         switch (ia) {
             .BuiltinType => |b| return ty(Type.Builtin.expand(b).asType()),
+            .Bool => |b| return .{ .type = Type.bool_lit, .data = .{ .bool = b } },
             else => return null,
         }
     }
@@ -185,7 +199,6 @@ pub const Module = struct {
 
     store: Type.Store,
     ast: AstStore,
-    max_stack: usize = 0,
     reached_functions: []Parser.Ast.Item.Id = &.{},
     entry: ?usize = null,
 
@@ -216,56 +229,27 @@ const Scope = struct {
     };
 
     pub const Symbol = struct {
-        ident: Ast.Ident,
         is_mutable: bool = false,
         value: Value,
     };
 
-    alloc: std.mem.Allocator,
-    symbols: std.SegmentedList(Symbol, 8),
-    max_stack: usize = 0,
+    symbols: []Symbol,
     ret: ?Type.Id = null,
     ret_value: ?Value = null,
 
-    pub fn init(alloc: std.mem.Allocator) Scope {
-        return .{ .alloc = alloc, .symbols = .{} };
-    }
-
-    pub fn deinit(self: *Scope) void {
-        self.symbols.deinit(self.alloc);
+    pub fn init(buffer: []Symbol) Scope {
+        return .{ .symbols = buffer[0..0] };
     }
 
     pub fn add(self: *Scope, sym: Symbol) Error!usize {
-        var final_sym = sym;
-        (try self.symbols.addOne(self.alloc)).* = final_sym;
+        self.symbols.len += 1;
+        self.symbols[self.symbols.len - 1] = sym;
         return self.symbols.len - 1;
     }
 
-    pub fn makeRt(self: *Scope, value: *Value) void {
-        if (value.is_runtime) return;
-        const index = self.indexOf(value) orelse unreachable;
-        value.is_runtime = true;
-        value.data.index = index;
-    }
-
-    pub fn indexOf(self: *Scope, value: *Value) ?usize {
-        for (0..self.symbols.dynamic_segments.len) |ri| {
-            const i = self.symbols.dynamic_segments.len - ri - 1;
-            const seg = self.symbols.dynamic_segments[i];
-            const pos: usize = @intFromPtr(seg);
-            if (pos > value.index or value.index >= pos + @as(usize, 1) << i) continue;
-            return i + @as(usize, @intFromPtr(seg));
-        }
-        return null;
-    }
-
-    pub fn find(self: *Scope, ident: Ast.Ident) ?struct { loc: *Symbol, index: usize } {
-        for (0..self.symbols.len) |ri| {
-            const i = self.symbols.len - ri - 1;
-            const sym = self.symbols.at(i);
-            if (sym.ident.eql(ident)) return .{ .loc = sym, .index = i };
-        }
-        return null;
+    pub fn find(self: *Scope, ident: Ast.Ident) ?*Symbol {
+        if (ident.unordered) return null;
+        return &self.symbols[ident.index];
     }
 
     pub fn pushFrame(self: *Scope) Frame {
@@ -273,7 +257,6 @@ const Scope = struct {
     }
 
     pub fn popFrame(self: *Scope, frame: Frame) void {
-        self.max_stack = @max(self.max_stack, self.symbols.len);
         self.symbols.len = frame.total;
     }
 };
@@ -301,8 +284,9 @@ pub fn check(alloc: std.mem.Allocator, ast: *const Parser.Ast, source: []const u
     var scratch = std.heap.ArenaAllocator.init(alloc);
     defer scratch.deinit();
 
-    var scope = Scope.init(alloc);
-    defer scope.deinit();
+    const scope_buffer = try alloc.alloc(Scope.Symbol, ast.peak_sym_count);
+    defer alloc.free(scope_buffer);
+    var scope = Scope.init(scope_buffer);
 
     var self = Self{
         .alloc = alloc,
@@ -327,17 +311,12 @@ fn checkFile(self: *Self) Error!void {
             .Func => |f| f.name,
         };
 
-        _ = try self.scope.add(.{
-            .ident = ident,
-            .value = Value{ .type = Type.decl_lit, .data = .{ .decl = item } },
-        });
-
         if (std.mem.eql(u8, ident.slice(self.source), "main")) try self.to_check.append(item);
     }
 
     if (self.to_check.items.len == 0) @panic("todo");
 
-    self.func_set = try self.alloc.alloc(FuncFlags, self.scope.symbols.len);
+    self.func_set = try self.alloc.alloc(FuncFlags, self.ast.items.items.len);
     for (self.func_set) |*f| f.* = .{};
     defer self.alloc.free(self.func_set);
 
@@ -346,8 +325,6 @@ fn checkFile(self: *Self) Error!void {
             .Func => |f| try self.checkFunc(f, id.index),
         }
     }
-
-    self.types.max_stack = self.scope.max_stack - self.scope.symbols.len;
 
     var reached_function_count: usize = 0;
     for (self.func_set) |f| reached_function_count += @intFromBool(f.computed_body);
@@ -364,14 +341,14 @@ fn checkSignature(self: *Self, func: Ast.Item.Func, id: usize) InnerError!Value 
     if (self.func_set[id].computed_signature) {
         for (func.params) |param| {
             const value = self.types.getValue(param.type);
-            _ = try self.scope.add(.{ .ident = param.name, .value = Value.rt(value.data.type) });
+            _ = try self.scope.add(.{ .value = Value.rt(value.data.type) });
         }
         return self.types.getValue(func.ret);
     }
 
     for (func.params) |param| {
         const value = try self.checkExpr(Type.type_lit, param.type);
-        _ = try self.scope.add(.{ .ident = param.name, .value = Value.rt(value.data.type) });
+        _ = try self.scope.add(.{ .value = Value.rt(value.data.type) });
     }
     const res = try self.checkExpr(Type.type_lit, func.ret);
 
@@ -397,14 +374,20 @@ fn checkFunc(self: *Self, func: Ast.Item.Func, id: usize) Error!void {
 }
 
 fn checkExpr(self: *Self, expected: ?Type.Id, expr: Parser.Ast.Expr.Id) InnerError!Value {
+    errdefer if (self.types.ast.at(expr)) |slot| {
+        slot.* = Value.never_lit;
+    };
+
     var val = switch (self.ast.expr_store.get(expr)) {
         .BuiltinType => |b| Value.ty(Type.Builtin.expand(b).asType()),
         .Int => |i| Value{ .type = Type.ctint_lit, .data = .{ .int = i } },
+        .Bool => |b| Value{ .type = Type.bool_lit, .data = .{ .bool = b } },
         .Ret => |r| try self.checkRet(r),
         .Binary => |o| try self.checkBinary(o),
         .Ident => |i| try self.checkIdent(i),
         .Var => |v| try self.checkVar(v),
         .Call => |c| try self.checkCall(c),
+        .If => |i| try self.checkIf(expected, i),
         inline else => |val, tag| std.debug.panic("todo: {any} {any}", .{ tag, val }),
     };
 
@@ -414,6 +397,24 @@ fn checkExpr(self: *Self, expected: ?Type.Id, expr: Parser.Ast.Expr.Id) InnerErr
     if (self.types.ast.at(expr)) |slot| slot.* = val;
 
     return val;
+}
+
+fn checkIf(self: *Self, expected: ?Type.Id, i: Parser.Ast.Expr.If) InnerError!Value {
+    const cond = try self.checkExpr(Type.bool_lit, i.cond);
+
+    if (!cond.is_runtime) {
+        if (cond.data.bool) return try self.checkExpr(expected, i.then);
+        if (i.els) |e| return try self.checkExpr(expected, e);
+        return Value{};
+    }
+
+    var then = self.checkExpr(null, i.then) catch Value.never_lit;
+    var els = if (i.els) |e| self.checkExpr(then.type, e) catch Value.never_lit else null;
+    then.type = if (els) |e| Type.unify(then.type, e.type) orelse @panic("todo") else then.type;
+
+    if (then.type.eql(Type.never_lit) and els != null) return error.Returned;
+
+    return Value.rt(then.type);
 }
 
 fn checkCall(self: *Self, c: Parser.Ast.Expr.Call) InnerError!Value {
@@ -442,20 +443,26 @@ fn checkVar(self: *Self, v: Parser.Ast.Expr.Var) InnerError!Value {
     value.is_runtime = !v.is_const;
     if (value.type.eql(Type.ctint_lit) and value.is_runtime) @panic("todo");
 
-    _ = try self.scope.add(.{ .ident = v.name, .is_mutable = !v.is_const, .value = value });
+    _ = try self.scope.add(.{ .is_mutable = !v.is_const, .value = value });
     return Value{ .is_runtime = value.is_runtime };
 }
 
 fn checkIdent(self: *Self, i: Parser.Ast.Ident) InnerError!Value {
-    var sym = self.scope.find(i) orelse std.debug.panic("todo: {s}", .{i.slice(self.source)});
-    if (!sym.loc.is_mutable) return sym.loc.value;
-    const data: Value.Data = if (sym.loc.value.is_runtime) .{ .void = {} } else .{ .pointer = &sym.loc.value };
+    var sym = self.scope.find(i) orelse return self.checkUnorderedIdent(i);
+    if (!sym.is_mutable) return sym.value;
+    const data: Value.Data = if (sym.value.is_runtime) .{ .void = {} } else .{ .pointer = &sym.value };
     return .{
-        .type = sym.loc.value.type,
+        .type = sym.value.type,
         .is_mutable = true,
-        .is_runtime = sym.loc.value.is_runtime,
+        .is_runtime = sym.value.is_runtime,
         .data = data,
     };
+}
+
+fn checkUnorderedIdent(self: *Self, i: Parser.Ast.Ident) InnerError!Value {
+    std.debug.assert(i.unordered);
+    const decl = self.ast.items.items[i.index];
+    return .{ .type = Type.decl_lit, .data = .{ .decl = decl } };
 }
 
 fn checkRet(self: *Self, r: Parser.Ast.Expr.Id) InnerError!Value {
@@ -475,7 +482,7 @@ fn checkRet(self: *Self, r: Parser.Ast.Expr.Id) InnerError!Value {
 
 fn checkBinary(self: *Self, b: Parser.Ast.Expr.Binary) InnerError!Value {
     return switch (b.op) {
-        .Add, .Sub => try self.checkMathOp(b),
+        .Add, .Sub, .Eq, .Ne, .Gt, .Lt, .Ge, .Le => try self.checkMathOp(b),
         .Assign => try self.checkAssign(b),
     };
 }
@@ -483,7 +490,11 @@ fn checkBinary(self: *Self, b: Parser.Ast.Expr.Binary) InnerError!Value {
 fn checkMathOp(self: *Self, op: Parser.Ast.Expr.Binary) InnerError!Value {
     const lhs = try self.checkExpr(null, op.lhs);
     const rhs = try self.checkExpr(lhs.type, op.rhs);
-    const ty = rhs.type;
+    const ty = switch (op.op) {
+        .Add, .Sub => lhs.type,
+        .Eq, .Ne, .Gt, .Lt, .Ge, .Le => Type.bool_lit,
+        else => unreachable,
+    };
 
     if (lhs.is_runtime or rhs.is_runtime) {
         if (!lhs.type.eql(rhs.type))
@@ -496,6 +507,12 @@ fn checkMathOp(self: *Self, op: Parser.Ast.Expr.Binary) InnerError!Value {
     return switch (op.op) {
         .Add => Value{ .type = ty, .data = .{ .int = lhs_val.int + rhs_val.int } },
         .Sub => Value{ .type = ty, .data = .{ .int = lhs_val.int - rhs_val.int } },
+        .Eq => Value{ .type = ty, .data = .{ .bool = lhs_val.int == rhs_val.int } },
+        .Ne => Value{ .type = ty, .data = .{ .bool = lhs_val.int != rhs_val.int } },
+        .Gt => Value{ .type = ty, .data = .{ .bool = lhs_val.int > rhs_val.int } },
+        .Lt => Value{ .type = ty, .data = .{ .bool = lhs_val.int < rhs_val.int } },
+        .Ge => Value{ .type = ty, .data = .{ .bool = lhs_val.int >= rhs_val.int } },
+        .Le => Value{ .type = ty, .data = .{ .bool = lhs_val.int <= rhs_val.int } },
         else => unreachable,
     };
 }

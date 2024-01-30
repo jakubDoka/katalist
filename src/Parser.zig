@@ -13,14 +13,20 @@ fn cloneSlice(comptime T: type, allocator: std.mem.Allocator, slice: []const T) 
 }
 
 pub const Ast = struct {
-    pub const Ident = packed struct(u32) {
+    pub const Ident = packed struct(u64) {
         last: bool = false,
-        len: u6 = 0,
-        offset: u25 = 0, // limits to 32 mib, should be enough
+        unordered: bool,
+        len: u6,
+        offset: u25, // limits to 32 mib, should be enough
+        index: u31,
 
-        pub fn init(offset: usize, len: usize) Ident {
-            std.debug.assert(len <= maxIdentLen);
-            return .{ .len = @intCast(len), .offset = @intCast(offset) };
+        pub fn init(offset: usize, len: usize, index: usize, unordered: bool) Ident {
+            return .{
+                .len = @intCast(len),
+                .offset = @intCast(offset),
+                .index = @intCast(index),
+                .unordered = unordered,
+            };
         }
 
         pub fn slice(self: Ident, src: []const u8) []const u8 {
@@ -69,6 +75,7 @@ pub const Ast = struct {
     pub const ExprTag = enum {
         Ident,
         Int,
+        Bool,
         Unary,
         Binary,
         Var,
@@ -76,6 +83,7 @@ pub const Ast = struct {
         Item,
         Block,
         Ret,
+        If,
         BuiltinType,
         Underscore,
     };
@@ -88,20 +96,34 @@ pub const Ast = struct {
             Add,
             Sub,
             Assign,
+            Eq,
+            Ne,
+            Lt,
+            Gt,
+            Le,
+            Ge,
 
             pub fn precedense(self: InfixOp) u8 {
                 return switch (self) {
                     .Add, .Sub => 8,
+                    .Eq, .Ne, .Lt, .Gt, .Le, .Ge => 9,
                     .Assign => 15,
+                };
+            }
+
+            pub fn isCommutative(self: InfixOp) bool {
+                return switch (self) {
+                    .Add, .Eq, .Ne => true,
+                    else => false,
                 };
             }
 
             pub fn tryFromToken(token: Lexer.Token) ?InfixOp {
                 return switch (token) {
-                    .Add => .Add,
-                    .Sub => .Sub,
-                    .Assign => .Assign,
-                    else => return null,
+                    inline else => |t| {
+                        if (!@hasField(InfixOp, @tagName(t))) return null;
+                        return @field(InfixOp, @tagName(t));
+                    },
                 };
             }
 
@@ -110,6 +132,12 @@ pub const Ast = struct {
                     .Add => try writer.writeByte('+'),
                     .Sub => try writer.writeByte('-'),
                     .Assign => try writer.writeAll("="),
+                    .Eq => try writer.writeAll("=="),
+                    .Ne => try writer.writeAll("!="),
+                    .Lt => try writer.writeAll("<"),
+                    .Gt => try writer.writeAll(">"),
+                    .Le => try writer.writeAll("<="),
+                    .Ge => try writer.writeAll(">="),
                 };
             }
         };
@@ -141,10 +169,17 @@ pub const Ast = struct {
             args: []Expr.Id,
         };
 
+        pub const If = struct {
+            cond: Expr.Id,
+            then: Expr.Id,
+            els: ?Expr.Id,
+        };
+
         pub const Block = []Expr.Id;
 
         Ident: Ident,
         Int: u64,
+        Bool: bool,
         Unary: Unary,
         Binary: Binary,
         Var: Var,
@@ -152,6 +187,7 @@ pub const Ast = struct {
         Item: Item.Id,
         Block: Block,
         Ret: Expr.Id,
+        If: If,
         BuiltinType: Type.Builtin.Compact,
         Underscore,
 
@@ -192,6 +228,7 @@ pub const Ast = struct {
     expr_store: Expr.Store,
     items: std.ArrayListUnmanaged(Item.Id),
     errors: std.ArrayListUnmanaged(ErrorMessage),
+    peak_sym_count: usize = undefined,
 
     pub fn init() Ast {
         return .{
@@ -317,7 +354,7 @@ pub fn Printer(comptime W: type) type {
         }
 
         fn printIdent(self: *PThis, ident: Ast.Ident) WriteError!void {
-            try self.writer.print("{s}#{d}", .{ ident.slice(self.source), ident.offset });
+            try self.writer.print("{s}#{d}", .{ ident.slice(self.source), ident.index });
         }
 
         fn printIndent(self: *PThis) WriteError!void {
@@ -329,7 +366,12 @@ pub fn Printer(comptime W: type) type {
 const Error = error{ParsingFailed} || std.mem.Allocator.Error;
 
 const Scope = struct {
-    pub const Frame = usize;
+    pub const Frame = struct {
+        const base = .{ .sym_count = 0, .ordered_sym_count = 0 };
+
+        sym_count: usize,
+        ordered_sym_count: usize,
+    };
 
     pub const Sym = struct {
         ident: Ast.Ident,
@@ -345,9 +387,12 @@ const Scope = struct {
     };
 
     symbols: std.ArrayList(Sym),
+    ordered_sym_count: usize = 0,
+    item_count: usize = 0,
+    peak_ordered_sym_count: usize = 0,
 
-    pub fn init(allocator: std.mem.Allocator) Scope {
-        return .{ .symbols = std.ArrayList(Sym).init(allocator) };
+    pub fn init(alloc: std.mem.Allocator) Scope {
+        return .{ .symbols = std.ArrayList(Sym).init(alloc) };
     }
 
     pub fn deinit(self: *Scope) void {
@@ -355,12 +400,15 @@ const Scope = struct {
     }
 
     pub fn pushFrame(self: *Scope) Frame {
-        return self.symbols.items.len;
+        return .{
+            .sym_count = self.symbols.items.len,
+            .ordered_sym_count = self.ordered_sym_count,
+        };
     }
 
     pub fn popFrame(self: *Scope, frame: Frame) void {
-        var to_keep = frame;
-        for (frame..self.symbols.items.len) |i| {
+        var to_keep = frame.sym_count;
+        for (frame.sym_count..self.symbols.items.len) |i| {
             const sym = self.symbols.items[i];
             if (!sym.resolved) {
                 self.symbols.items[to_keep] = sym;
@@ -368,7 +416,10 @@ const Scope = struct {
             }
         }
 
+        self.peak_ordered_sym_count = @max(self.peak_ordered_sym_count, self.ordered_sym_count);
+
         self.symbols.items.len = to_keep;
+        self.ordered_sym_count = frame.ordered_sym_count;
     }
 
     pub fn add(self: *Scope, loc: Occurence, ident: []const u8, source: []const u8) !Ast.Ident {
@@ -379,23 +430,32 @@ const Scope = struct {
         return self.handleSym(loc, ident, source, false);
     }
 
-    fn handleSym(self: *Scope, loc: Occurence, ident: []const u8, source: []const u8, or_declare: bool) !Ast.Ident {
+    fn handleSym(self: *Scope, loc: Occurence, ident: []const u8, source: []const u8, declare: bool) !Ast.Ident {
         var i = self.symbols.items.len;
         while (i > 0) {
             i -= 1;
             const sym = &self.symbols.items[i];
             if (sym.ident.len != ident.len) continue;
-            if (sym.resolved and or_declare) continue;
+            if (sym.resolved and declare) continue;
             if (std.mem.eql(u8, sym.ident.slice(source), ident)) {
-                sym.resolved = sym.resolved or or_declare;
+                sym.resolved = sym.resolved or declare;
                 sym.last_occurence = loc;
                 return sym.ident;
             }
         }
 
         const pos = @intFromPtr(ident.ptr) - @intFromPtr(source.ptr);
-        const sym = Ast.Ident.init(pos, ident.len);
-        try self.symbols.append(.{ .ident = sym, .resolved = or_declare, .last_occurence = loc });
+        const index = switch (loc) {
+            .Item, .Expr => self.item_count,
+            else => self.ordered_sym_count,
+        };
+        const sym = Ast.Ident.init(pos, ident.len, index, loc == .Expr or loc == .Item);
+        try self.symbols.append(.{ .ident = sym, .resolved = declare, .last_occurence = loc });
+
+        switch (loc) {
+            .Item, .Expr => self.item_count += 1,
+            else => self.ordered_sym_count += 1,
+        }
 
         return sym;
     }
@@ -432,7 +492,8 @@ pub fn parse(allocator: std.mem.Allocator, src: []const u8) Error!Ast {
         return err;
     };
 
-    try self.popFrame(0); // filter out dispatched symbols, leavin undefined symbols
+    try self.popFrame(Scope.Frame.base);
+    ast.peak_sym_count = scope.peak_ordered_sym_count;
 
     for (scope.symbols.items) |sym| {
         try self.addError(.{ .UndeclaredIdent = .{
@@ -482,7 +543,7 @@ pub fn parseFunction(self: *Self) Error!Ast.Item.Func {
 }
 
 fn popFrame(self: *Self, frame: Scope.Frame) !void {
-    for (self.scope.symbols.items[frame..]) |sym| {
+    for (self.scope.symbols.items[frame.sym_count..]) |sym| {
         switch (sym.last_occurence) {
             .Expr => |e| switch (self.ast.expr_store.get_ptr(e)) {
                 .Ident => |i| i.last = true,
@@ -569,6 +630,8 @@ fn parseUnitExpr(self: *Self) Error!Ast.Expr.Id {
             .signed = token.kind == .Int,
             .bit_width = std.fmt.parseInt(u15, token.source[1..], 10) catch unreachable,
         } }) },
+        .KeyBool => .{ .BuiltinType = compact(.Bool) },
+        .KeyFalse, .KeyTrue => .{ .Bool = token.kind == .KeyTrue },
         .Number => .{ .Int = std.fmt.parseInt(u64, token.source, 10) catch |err| b: {
             try self.addError(.{ .InvalidNumber = .{
                 .err = err,
@@ -582,7 +645,8 @@ fn parseUnitExpr(self: *Self) Error!Ast.Expr.Id {
         } },
         .KeyReturn => .{ .Ret = try self.parseExpr() },
         .KeyVar, .KeyConst => .{ .Var = try self.parseVar(token.kind == .KeyConst) },
-        else => return self.failExpect(token, &.{ .Ident, .Number, .Sub, .KeyReturn }),
+        .KeyIf => .{ .If = try self.parseIf() },
+        else => return self.failExpect(token, &.{}),
     };
 
     while (true) {
@@ -591,6 +655,20 @@ fn parseUnitExpr(self: *Self) Error!Ast.Expr.Id {
             else => return try self.addExpr(unit),
         }
     }
+}
+
+fn parseIf(self: *Self) Error!Ast.Expr.If {
+    _ = try self.expectAdvance(.LParen);
+    const cond = try self.parseExpr();
+    _ = try self.expectAdvance(.RParen);
+    const then = try self.parseExpr();
+    const els = if (self.tryAdvance(.KeyElse) != null) try self.parseExpr() else null;
+
+    return .{
+        .cond = cond,
+        .then = then,
+        .els = els,
+    };
 }
 
 fn parseVar(self: *Self, is_const: bool) Error!Ast.Expr.Var {
@@ -613,10 +691,9 @@ fn parseVar(self: *Self, is_const: bool) Error!Ast.Expr.Var {
 
 fn parseCallExpr(self: *Self, callee: Ast.Expr) Error!Ast.Expr {
     _ = self.advance();
-    const args = try self.parseList(Ast.Expr.Id, .RParen, .Comma, parseExpr);
     return .{ .Call = .{
         .callee = try self.addExpr(callee),
-        .args = args,
+        .args = try self.parseList(Ast.Expr.Id, .RParen, .Comma, parseExpr),
     } };
 }
 

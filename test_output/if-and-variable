@@ -1,0 +1,46 @@
+fn main#0() u64 {
+    let a#0 = EnumList.Id(Parser.Ast.ExprTag){ .tag = Parser.Ast.ExprTag.If, .index = 1 };
+    (a#0 = (a#0 + 1));
+    ret a#0;
+}
+fn foo#1() bool {
+    ret EnumList.Id(Parser.Ast.ExprTag){ .tag = Parser.Ast.ExprTag.Bool, .index = 0 };
+}
+    global main
+
+    section .text
+main:
+    push r14
+    push r15
+    push rbp
+    mov rbp, rsp
+    call L1
+    mov r15, rax
+    cmp r15, 0x0
+    je L2
+    mov r14, 0x2
+    jmp L3
+    L2:
+    mov r14, 0x3
+    L3:
+    mov r15, r14
+    inc r15
+    mov r14, r15
+    mov rax, r14
+    jmp L4
+L4:
+    mov rsp, rbp
+    pop rbp
+    pop r15
+    pop r14
+    ret
+L1:
+    push rbp
+    mov rbp, rsp
+    mov rax, 0x0
+    jmp L5
+L5:
+    mov rsp, rbp
+    pop rbp
+    ret
+exit code: child_process.ChildProcess.Term{ .Exited = 4 }

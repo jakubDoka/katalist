@@ -1,0 +1,192 @@
+fn main#0() u64 {
+    let i#0 = (1 + 2);
+    let j#1 = (i#0 + 3);
+    let k#2 = j#1;
+    (k#2 = (k#2 + (5 + foo#1(4))));
+    let k#3 = j#1;
+    (k#3 = (k#3 + (5 + foo#1(4))));
+    let k#4 = j#1;
+    (k#4 = (k#4 + (5 + foo#1(4))));
+    let k#5 = j#1;
+    (k#5 = (k#5 + (5 + foo#1(4))));
+    let k#6 = j#1;
+    (k#6 = (k#6 + (5 + foo#1(4))));
+    let k#7 = j#1;
+    (k#7 = (k#7 + (5 + foo#1(4))));
+    let k#8 = j#1;
+    (k#8 = (k#8 + (5 + foo#1(4))));
+    let k#9 = j#1;
+    (k#9 = (k#9 + (5 + foo#1(4))));
+    let k#10 = j#1;
+    (k#10 = (k#10 + (5 + foo#1(4))));
+    let k#11 = j#1;
+    (k#11 = (k#11 + (5 + foo#1(4))));
+    let k#12 = j#1;
+    (k#12 = (k#12 + (5 + foo#1(4))));
+    let k#13 = j#1;
+    (k#13 = (k#13 + (5 + foo#1(4))));
+    ret k#13;
+}
+fn foo#1(a#0: u64) u64 {
+    ret (a#0 + (a#0 + 4));
+}
+    global main
+
+    section .text
+main:
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    push rbp
+    mov rbp, rsp
+    mov r15, 0x6
+    mov rdi, 0x4
+    call L1
+    mov r14, rax
+    add r14, 0x5
+    add r14, r15
+    mov r15, r14
+    mov r13, 0x6
+    mov rdi, 0x4
+    call L1
+    mov r12, rax
+    add r12, 0x5
+    add r12, r13
+    mov r13, r12
+    mov r11, 0x6
+    mov rdi, 0x4
+    call L1
+    mov r10, rax
+    add r10, 0x5
+    add r10, r11
+    mov r11, r10
+    mov r9, 0x6
+    mov rdi, 0x4
+    call L1
+    mov r8, rax
+    add r8, 0x5
+    add r8, r9
+    mov r9, r8
+    mov rdi, 0x6
+    push rdi
+    mov rdi, 0x4
+    call L1
+    pop rdi
+    mov rsi, rax
+    add rsi, 0x5
+    add rsi, rdi
+    mov rdi, rsi
+    mov rdx, 0x6
+    push rdi
+    mov rdi, 0x4
+    call L1
+    pop rdi
+    mov rcx, rax
+    add rcx, 0x5
+    add rcx, rdx
+    mov rdx, rcx
+    mov rbx, 0x6
+    push rdi
+    mov rdi, 0x4
+    call L1
+    pop rdi
+    push rbx
+    mov rbx, rax
+    add rbx, 0x5
+    add rbx, [rbp - 0x0]
+    mov [rbp - 0x0], rbx
+    push rcx
+    mov rcx, 0x6
+    push rdi
+    mov rdi, 0x4
+    call L1
+    pop rdi
+    push rdx
+    mov rdx, rax
+    add rdx, 0x5
+    add rdx, rcx
+    mov rcx, rdx
+    push rsi
+    mov rsi, 0x6
+    push rdi
+    mov rdi, 0x4
+    call L1
+    pop rdi
+    push rdi
+    mov rdi, rax
+    add rdi, 0x5
+    add rdi, rsi
+    mov rsi, rdi
+    push r8
+    mov r8, 0x6
+    push rdi
+    mov rdi, 0x4
+    call L1
+    pop rdi
+    push r9
+    mov r9, rax
+    add r9, 0x5
+    add r9, r8
+    mov r8, r9
+    push r10
+    mov r10, 0x6
+    push rdi
+    mov rdi, 0x4
+    call L1
+    pop rdi
+    push r11
+    mov r11, rax
+    add r11, 0x5
+    add r11, r10
+    mov r10, r11
+    push r12
+    mov r12, 0x6
+    push rdi
+    mov rdi, 0x4
+    call L1
+    pop rdi
+    push r13
+    mov r13, rax
+    add r13, 0x5
+    add r13, r12
+    mov r12, r13
+    sub rsp, 0x58
+    mov rax, r12
+    jmp L2
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop rbx
+L2:
+    mov rsp, rbp
+    pop rbp
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    ret
+L1:
+    push r15
+    push rbp
+    mov rbp, rsp
+    mov r15, rdi
+    add r15, 0x4
+    add r15, rdi
+    mov rax, r15
+    jmp L3
+L3:
+    mov rsp, rbp
+    pop rbp
+    pop r15
+    ret
+exit code: child_process.ChildProcess.Term{ .Exited = 23 }

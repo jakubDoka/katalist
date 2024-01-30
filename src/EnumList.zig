@@ -82,18 +82,17 @@ pub fn Id(comptime T: type) type {
 const EnumMetadata = struct {
     const Self = @This();
 
+    target: type,
     index: type,
     union_types: []type,
     unions: []Type.Union,
     field_names: [][]const u8,
-    omited_field_lookup: []?usize,
 
     pub fn construct(comptime T: type) Self {
         const meta = @typeInfo(T).Union;
         const Tag = meta.tag_type.?;
 
         comptime var distinct_layout_count = meta.fields.len;
-        comptime var omited_field_lookup: [meta.fields.len]?usize = undefined;
         for (meta.fields, 0..) |field, i| {
             if (isInlined(Tag, field.type)) {
                 distinct_layout_count -= 1;
@@ -115,16 +114,13 @@ const EnumMetadata = struct {
         comptime var size_and_align: [distinct_layout_count]struct { usize, usize } = undefined;
         comptime var union_index = 0;
 
-        o: for (meta.fields, 0..) |field, i| {
+        o: for (meta.fields) |field| {
             if (isInlined(Tag, field.type)) {
-                omited_field_lookup[i] = null;
                 continue;
             }
 
-            for (unions[0..union_index], size_and_align[0..union_index], 0..) |*un, sa, j| {
+            for (unions[0..union_index], size_and_align[0..union_index]) |*un, sa| {
                 if (sa[0] == @alignOf(field.type) and sa[1] == @sizeOf(field.type)) {
-                    omited_field_lookup[i] = j;
-
                     for (un.fields) |f| {
                         if (f.type == field.type) {
                             continue :o;
@@ -142,7 +138,6 @@ const EnumMetadata = struct {
                 }
             }
 
-            omited_field_lookup[i] = union_index;
             unions[union_index] = .{
                 .tag_type = null,
                 .fields = &.{.{ .name = field.name, .type = field.type, .alignment = @alignOf(field.type) }},
@@ -161,11 +156,11 @@ const EnumMetadata = struct {
         }
 
         return .{
+            .target = T,
             .index = Id(meta.tag_type.?),
             .unions = &unions,
             .field_names = &field_names,
             .union_types = &union_types,
-            .omited_field_lookup = &omited_field_lookup,
         };
     }
 
@@ -264,7 +259,7 @@ pub fn Unmanaged(comptime T: type) type {
                 inline else => |tag| {
                     if (Index.decodeStatic(T, tag, id.index)) |val| return val;
 
-                    const field = @typeInfo(T).Union.fields[@intFromEnum(tag)];
+                    const field = std.meta.fieldInfo(T, tag);
                     inline for (meta.field_names, meta.unions) |nm, un| {
                         inline for (un.fields) |f| {
                             if (f.type == field.type) {
@@ -283,8 +278,7 @@ pub fn Unmanaged(comptime T: type) type {
                 inline else => |tag| {
                     if (Index.decodeStatic(AsPtr, tag, id.index)) |val| return val;
 
-                    const field = @typeInfo(T).Union.fields[@intFromEnum(tag)];
-
+                    const field = std.meta.fieldInfo(T, tag);
                     inline for (meta.field_names, meta.unions) |nm, un| {
                         inline for (un.fields) |f| {
                             if (f.type == field.type) {
@@ -309,8 +303,8 @@ pub fn Unmanaged(comptime T: type) type {
         }
 
         pub fn nextId(self: *const Self, comptime tag: std.meta.Tag(T)) Index {
-            const D = std.meta.fieldInfo(T, tag);
-            return .{ .tag = tag, .index = @intCast(self.approxCountFor(D.type)) };
+            const field = std.meta.fieldInfo(T, tag);
+            return .{ .tag = tag, .index = @intCast(self.approxCountFor(field.type)) };
         }
     };
 }
@@ -320,7 +314,7 @@ pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
         const Self = @This();
         const meta: EnumMetadata = ES.meta;
 
-        const Lane = std.ArrayListUnmanaged(T);
+        const Lane = std.ArrayListUnmanaged(?T);
         const Storage = b: {
             var fields: [meta.field_names.len]Type.StructField = undefined;
             for (meta.field_names, &fields) |nm, *f| {
@@ -349,6 +343,7 @@ pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
             inline for (meta.field_names) |nm| {
                 @field(storage, nm) = .{};
                 try @field(storage, nm).resize(alloc, @field(based_on.storage, nm).items.len);
+                for (@field(storage, nm).items) |*slot| slot.* = null;
             }
             return .{ .storage = storage };
         }
@@ -357,26 +352,40 @@ pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
             inline for (meta.field_names) |nm| @field(self.storage, nm).deinit(alloc);
         }
 
-        pub fn at(self: *Self, id: meta.index) ?*T {
+        pub fn at(self: *Self, id: meta.index) ?*?T {
             return switch (id.tag) {
-                inline else => |tag| self.dispatch(@intFromEnum(tag), id.index),
+                inline else => |tag| self.dispatch(tag, id.index),
             };
         }
 
         pub fn get(self: *const Self, id: meta.index) ?T {
             return switch (id.tag) {
-                inline else => |tag| self.dispatch_get(@intFromEnum(tag), id.index),
+                inline else => |tag| self.dispatch_get(tag, id.index),
             };
         }
 
-        fn dispatch_get(self: *const Self, comptime tag: usize, index: usize) ?T {
-            const i = meta.omited_field_lookup[tag] orelse return null;
-            return @field(self.storage, meta.field_names[i]).items[index];
+        fn dispatch_get(self: *const Self, comptime tag: std.meta.Tag(meta.target), index: usize) ?T {
+            const field = std.meta.fieldInfo(meta.target, tag);
+            inline for (meta.field_names, meta.unions) |nm, un| {
+                inline for (un.fields) |f| {
+                    if (f.type == field.type) {
+                        return @field(self.storage, nm).items[index];
+                    }
+                }
+            }
+            return null;
         }
 
-        fn dispatch(self: *Self, comptime tag: usize, index: usize) ?*T {
-            const i = meta.omited_field_lookup[tag] orelse return null;
-            return &@field(self.storage, meta.field_names[i]).items[index];
+        fn dispatch(self: *Self, comptime tag: std.meta.Tag(meta.target), index: usize) ?*?T {
+            const field = std.meta.fieldInfo(meta.target, tag);
+            inline for (meta.field_names, meta.unions) |nm, un| {
+                inline for (un.fields) |f| {
+                    if (f.type == field.type) {
+                        return &@field(self.storage, nm).items[index];
+                    }
+                }
+            }
+            return null;
         }
     };
 }

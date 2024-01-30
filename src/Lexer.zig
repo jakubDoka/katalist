@@ -1,8 +1,9 @@
 const std = @import("std");
 const maxIdentLen = @import("Ident.zig").cap;
+const garbage = @import("garbage.zig");
 
 const Self = @This();
-pub const Token = enum(u8) {
+pub const Token = enum {
     Ident,
     Underscore,
     Number,
@@ -10,6 +11,12 @@ pub const Token = enum(u8) {
     Add,
     Sub,
     Assign,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
 
     Colon,
     Semi,
@@ -24,11 +31,16 @@ pub const Token = enum(u8) {
 
     KeyVar,
     KeyConst,
+    KeyIf,
+    KeyElse,
     KeyReturn,
     KeyFn,
     KeyUsize,
     KeyIsize,
+    KeyBool,
     KeyVoid,
+    KeyTrue,
+    KeyFalse,
 
     Int,
     Uint,
@@ -56,9 +68,7 @@ pub const Token = enum(u8) {
                     if (first_keyword == null) {
                         first_keyword = i;
                     }
-                    var name = value.name[prefix.len..].*;
-                    for (&name) |*c| c.* = std.ascii.toLower(c.*);
-                    keyword_names[i - first_keyword.?] = &name;
+                    keyword_names[i - first_keyword.?] = garbage.toLowerCt(value.name[prefix.len..]);
                 }
             }
 
@@ -124,13 +134,16 @@ pub fn nextToken(self: *Self) TokenMeta {
                 break :b .Number;
             },
 
-            '+' => .Add,
-            '-' => .Sub,
-            '=' => .Assign,
-
             ':' => .Colon,
             ';' => .Semi,
             ',' => .Comma,
+
+            '+' => .Add,
+            '-' => .Sub,
+            '=' => if (self.tryAdvance('=') != null) Token.Eq else .Assign,
+            '<' => if (self.tryAdvance('=') != null) Token.Le else .Lt,
+            '>' => if (self.tryAdvance('=') != null) Token.Ge else .Gt,
+            '!' => if (self.tryAdvance('=') != null) Token.Ne else .Unknown,
 
             '(' => .LParen,
             ')' => .RParen,
@@ -146,6 +159,14 @@ pub fn nextToken(self: *Self) TokenMeta {
     }
 
     return TokenMeta{ .kind = .Eof, .pos = self.cursor, .source = "" };
+}
+
+fn tryAdvance(self: *Self, c: u8) ?u8 {
+    if (self.cursor < self.source.len and self.source[self.cursor] == c) {
+        defer self.cursor += 1;
+        return c;
+    }
+    return null;
 }
 
 fn advance(self: *Self) u8 {
