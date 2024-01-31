@@ -1,34 +1,34 @@
-fn main#0() u64 {
-    let i#0 = (1 + 2);
-    let j#1 = (i#0 + 3);
-    let k#2 = j#1;
-    (k#2 = (k#2 + (5 + foo#1(4))));
-    let k#3 = j#1;
-    (k#3 = (k#3 + (5 + foo#1(4))));
-    let k#4 = j#1;
-    (k#4 = (k#4 + (5 + foo#1(4))));
-    let k#5 = j#1;
-    (k#5 = (k#5 + (5 + foo#1(4))));
-    let k#6 = j#1;
-    (k#6 = (k#6 + (5 + foo#1(4))));
-    let k#7 = j#1;
-    (k#7 = (k#7 + (5 + foo#1(4))));
-    let k#8 = j#1;
-    (k#8 = (k#8 + (5 + foo#1(4))));
-    let k#9 = j#1;
-    (k#9 = (k#9 + (5 + foo#1(4))));
-    let k#10 = j#1;
-    (k#10 = (k#10 + (5 + foo#1(4))));
-    let k#11 = j#1;
-    (k#11 = (k#11 + (5 + foo#1(4))));
-    let k#12 = j#1;
-    (k#12 = (k#12 + (5 + foo#1(4))));
-    let k#13 = j#1;
-    (k#13 = (k#13 + (5 + foo#1(4))));
-    ret k#13;
+fn main() u64 {
+    let i = 1 + 2;
+    let j = i + 3;
+    let k = j;
+    k = k + 5 + foo(4);
+    let k = j;
+    k = k + 5 + foo(4);
+    let k = j;
+    k = k + 5 + foo(4);
+    let k = j;
+    k = k + 5 + foo(4);
+    let k = j;
+    k = k + 5 + foo(4);
+    let k = j;
+    k = k + 5 + foo(4);
+    let k = j;
+    k = k + 5 + foo(4);
+    let k = j;
+    k = k + 5 + foo(4);
+    let k = j;
+    k = k + 5 + foo(4);
+    let k = j;
+    k = k + 5 + foo(4);
+    let k = j;
+    k = k + 5 + foo(4);
+    let k = j;
+    k = k + 5 + foo(4);
+    ret k;
 }
-fn foo#1(a#0: u64) u64 {
-    ret (a#0 + (a#0 + 4));
+fn foo(a: u64) u64 {
+    ret a + a + 4;
 }
     global main
 
@@ -42,129 +42,153 @@ main:
     push rbp
     mov rbp, rsp
     mov r15, 0x6
+    mov r14, r15
+    add r14, 0x5
     mov rdi, 0x4
     call L1
-    mov r14, rax
-    add r14, 0x5
-    add r14, r15
+    mov r13, rax
+    add r14, r13
     mov r15, r14
     mov r13, 0x6
+    mov r12, r13
+    add r12, 0x5
     mov rdi, 0x4
     call L1
-    mov r12, rax
-    add r12, 0x5
-    add r12, r13
+    mov r11, rax
+    add r12, r11
     mov r13, r12
     mov r11, 0x6
+    mov r10, r11
+    add r10, 0x5
     mov rdi, 0x4
     call L1
-    mov r10, rax
-    add r10, 0x5
-    add r10, r11
+    mov r9, rax
+    add r10, r9
     mov r11, r10
     mov r9, 0x6
+    mov r8, r9
+    add r8, 0x5
     mov rdi, 0x4
     call L1
-    mov r8, rax
-    add r8, 0x5
-    add r8, r9
+    mov rdi, rax
+    add r8, rdi
     mov r9, r8
     mov rdi, 0x6
+    mov rsi, rdi
+    add rsi, 0x5
     push rdi
     mov rdi, 0x4
     call L1
     pop rdi
-    mov rsi, rax
-    add rsi, 0x5
-    add rsi, rdi
+    mov rdx, rax
+    add rsi, rdx
     mov rdi, rsi
     mov rdx, 0x6
+    mov rcx, rdx
+    add rcx, 0x5
     push rdi
     mov rdi, 0x4
     call L1
     pop rdi
-    mov rcx, rax
-    add rcx, 0x5
-    add rcx, rdx
+    mov rbx, rax
+    add rcx, rbx
     mov rdx, rcx
     mov rbx, 0x6
-    push rdi
-    mov rdi, 0x4
-    call L1
-    pop rdi
     push rbx
-    mov rbx, rax
+    mov rbx, [rbp - 0x0]
     add rbx, 0x5
-    add rbx, [rbp - 0x0]
-    mov [rbp - 0x0], rbx
-    push rcx
-    mov rcx, 0x6
     push rdi
     mov rdi, 0x4
     call L1
     pop rdi
+    push rcx
+    mov rcx, rax
+    add rbx, rcx
+    pop rcx
+    mov [rbp - 0x0], rbx
     push rdx
-    mov rdx, rax
-    add rdx, 0x5
-    add rdx, rcx
-    mov rcx, rdx
+    mov rdx, 0x6
     push rsi
-    mov rsi, 0x6
+    mov rsi, rdx
+    add rsi, 0x5
     push rdi
     mov rdi, 0x4
     call L1
     pop rdi
     push rdi
     mov rdi, rax
-    add rdi, 0x5
-    add rdi, rsi
-    mov rsi, rdi
+    add rsi, rdi
+    pop rdi
+    mov rdx, rsi
     push r8
     mov r8, 0x6
-    push rdi
-    mov rdi, 0x4
-    call L1
-    pop rdi
     push r9
-    mov r9, rax
+    mov r9, r8
     add r9, 0x5
-    add r9, r8
-    mov r8, r9
-    push r10
-    mov r10, 0x6
     push rdi
     mov rdi, 0x4
     call L1
     pop rdi
+    push r10
+    mov r10, rax
+    add r9, r10
+    pop r10
+    mov r8, r9
     push r11
-    mov r11, rax
-    add r11, 0x5
-    add r11, r10
-    mov r10, r11
+    mov r11, 0x6
     push r12
-    mov r12, 0x6
+    mov r12, r11
+    add r12, 0x5
     push rdi
     mov rdi, 0x4
     call L1
     pop rdi
     push r13
     mov r13, rax
-    add r13, 0x5
-    add r13, r12
-    mov r12, r13
-    sub rsp, 0x58
-    mov rax, r12
-    jmp L2
+    add r12, r13
     pop r13
-    pop r12
-    pop r11
-    pop r10
-    pop r9
-    pop r8
+    mov r11, r12
+    push r14
+    mov r14, 0x6
+    push r15
+    mov r15, r14
+    add r15, 0x5
+    push rdi
+    mov rdi, 0x4
+    call L1
     pop rdi
+    push rbx
+    mov rbx, rax
+    add r15, rbx
+    pop rbx
+    mov r14, r15
+    push rcx
+    mov rcx, 0x6
+    push rdx
+    mov rdx, rcx
+    add rdx, 0x5
+    push rdi
+    mov rdi, 0x4
+    call L1
+    pop rdi
+    push rsi
+    mov rsi, rax
+    add rdx, rsi
     pop rsi
+    mov rcx, rdx
+    sub rsp, 0x58
+    mov rax, rcx
+    jmp L2
     pop rdx
     pop rcx
+    pop r15
+    pop r14
+    pop r12
+    pop r11
+    pop r9
+    pop r8
+    pop rsi
+    pop rdx
     pop rbx
 L2:
     mov rsp, rbp
@@ -180,8 +204,8 @@ L1:
     push rbp
     mov rbp, rsp
     mov r15, rdi
-    add r15, 0x4
     add r15, rdi
+    add r15, 0x4
     mov rax, r15
     jmp L3
 L3:

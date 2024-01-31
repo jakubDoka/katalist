@@ -89,7 +89,7 @@ pub const CountingAllocator = struct {
 };
 
 pub fn printtest(comptime name: []const u8, comptime tst: anytype, ctx: anytype) !void {
-    (try std.Thread.spawn(.{}, runPrinttest, .{ name, tst, ctx })).detach();
+    try runPrinttest(name, tst, ctx);
 }
 
 fn runPrinttest(comptime name: []const u8, comptime tst: anytype, ctx: anytype) !void {
@@ -120,7 +120,7 @@ fn runPrinttest(comptime name: []const u8, comptime tst: anytype, ctx: anytype) 
     if (bytes.len == 0) {
         try out_file.writeAll(buffer.items);
         std.log.warn("new test detected: {s}", .{name});
-        std.log.info("test output: {s}", .{buffer.items});
+        std.log.warn("test output:\n{s}", .{buffer.items});
         return;
     }
 
@@ -138,7 +138,7 @@ fn runPrinttest(comptime name: []const u8, comptime tst: anytype, ctx: anytype) 
     try draft_file.writeAll(buffer.items);
 
     var child = std.process.Child.init(
-        &.{ "/usr/bin/diff", "--color", "-y", out_path, draft_path },
+        &.{ "/usr/bin/diff", "--color", "-y", "--left-column", out_path, draft_path },
         std.heap.page_allocator,
     );
     _ = try child.spawnAndWait();

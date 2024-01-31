@@ -86,6 +86,7 @@ pub const Ast = struct {
         If,
         BuiltinType,
         Underscore,
+        Parens,
     };
 
     pub const Expr = union(ExprTag) {
@@ -190,6 +191,7 @@ pub const Ast = struct {
         If: If,
         BuiltinType: Type.Builtin.Compact,
         Underscore,
+        Parens: Expr.Id,
 
         pub fn clone(self: *const Expr, alloc: std.mem.Allocator) !Expr {
             return switch (self.*) {
@@ -317,8 +319,28 @@ pub fn Printer(comptime W: type) type {
                 .BuiltinType => |s| try Type.Builtin.expand(s).print(self.writer),
                 .Call => |s| try self.printCall(s),
                 .Underscore => try self.writer.writeByte('_'),
+                .Parens => |s| try self.printParens(s),
+                .If => |s| try self.printIf(s),
+                .Bool => |s| try self.writer.print("{any}", .{s}),
                 else => try self.writer.print("{any}", .{expr}),
             };
+        }
+
+        fn printIf(self: *PThis, expr: Expr.If) WriteError!void {
+            try self.writer.writeAll("if (");
+            try self.printExpr(expr.cond);
+            try self.writer.writeAll(") ");
+            try self.printExpr(expr.then);
+            if (expr.els) |els| {
+                try self.writer.writeAll(" else ");
+                try self.printExpr(els);
+            }
+        }
+
+        fn printParens(self: *PThis, expr: Expr.Id) WriteError!void {
+            try self.writer.writeByte('(');
+            try self.printExpr(expr);
+            try self.writer.writeByte(')');
         }
 
         fn printCall(self: *PThis, expr: Expr.Call) WriteError!void {
@@ -344,17 +366,15 @@ pub fn Printer(comptime W: type) type {
         }
 
         fn printBinary(self: *PThis, expr: Expr.Binary) WriteError!void {
-            try self.writer.writeByte('(');
             try self.printExpr(expr.lhs);
             try self.writer.writeByte(' ');
             try expr.op.print(self.writer);
             try self.writer.writeByte(' ');
             try self.printExpr(expr.rhs);
-            try self.writer.writeByte(')');
         }
 
         fn printIdent(self: *PThis, ident: Ast.Ident) WriteError!void {
-            try self.writer.print("{s}#{d}", .{ ident.slice(self.source), ident.index });
+            try self.writer.writeAll(ident.slice(self.source));
         }
 
         fn printIndent(self: *PThis) WriteError!void {
@@ -602,7 +622,7 @@ fn parseExprPrec(self: *Self, prec: u8, initial: Ast.Expr.Id) Error!Ast.Expr.Id 
         const next_op = Ast.Expr.InfixOp.tryFromToken(self.next_token.kind) orelse return left;
         const next_prec = next_op.precedense();
 
-        if (next_prec > prec) return left;
+        if (next_prec >= prec) return left;
         _ = self.advance();
 
         left = try self.addExpr(.{ .Binary = .{
@@ -622,6 +642,11 @@ fn parseUnitExpr(self: *Self) Error!Ast.Expr.Id {
             token.source,
             self.lexer.source,
         ) },
+        .LParen => b: {
+            const expr = try self.parseExpr();
+            _ = try self.expectAdvance(.RParen);
+            break :b .{ .Parens = expr };
+        },
         .Underscore => .{ .Underscore = {} },
         .KeyVoid => .{ .BuiltinType = compact(.Void) },
         .KeyUsize => .{ .BuiltinType = compact(.{ .Int = Type.Int.Usize }) },
@@ -632,12 +657,12 @@ fn parseUnitExpr(self: *Self) Error!Ast.Expr.Id {
         } }) },
         .KeyBool => .{ .BuiltinType = compact(.Bool) },
         .KeyFalse, .KeyTrue => .{ .Bool = token.kind == .KeyTrue },
-        .Number => .{ .Int = std.fmt.parseInt(u64, token.source, 10) catch |err| b: {
+        .Number => .{ .Int = std.fmt.parseInt(u64, token.source, 10) catch |err| {
             try self.addError(.{ .InvalidNumber = .{
                 .err = err,
                 .pos = token.pos,
             } });
-            break :b 0;
+            return Error.ParsingFailed;
         } },
         .Sub => .{ .Unary = .{
             .op = .Neg,

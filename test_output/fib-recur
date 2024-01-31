@@ -1,9 +1,9 @@
-fn main#0() u64 {
-    ret fib#1(10);
+fn main() u64 {
+    ret fib(10);
 }
-fn fib#1(n#0: u64) u64 {
-    EnumList.Id(Parser.Ast.ExprTag){ .tag = Parser.Ast.ExprTag.If, .index = 0 };
-    ret (fib#1((n#0 - 1)) + fib#1((n#0 - 2)));
+fn fib(n: u64) u64 {
+    if (n < 2) ret n;
+    ret fib(n - 1) + fib(n - 2);
 }
     global main
 
@@ -29,10 +29,10 @@ L1:
     push rbp
     mov rbp, rsp
     mov r15, rdi
-    cmp r15, 0x2
+    cmp r15b, 0x2
     setl r14b
     movzx r14, r14b
-    cmp r14, 0x0
+    cmp r14b, 0x0
     je L3
     mov rax, rdi
     jmp L4

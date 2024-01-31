@@ -221,6 +221,14 @@ pub const Module = struct {
     pub fn getValue(self: *const Module, expr: Parser.Ast.Expr.Id) Value {
         return self.ast.get(expr) orelse Value.fromInlineAst(expr).?;
     }
+
+    pub fn bitSizeOf(self: *const Module, ty: Type.Id) u12 {
+        return switch (self.store.get(ty)) {
+            .Int => |i| @intCast(i.bit_width),
+            .Bool => 1,
+            else => 0,
+        };
+    }
 };
 
 const Scope = struct {
@@ -380,7 +388,7 @@ fn checkExpr(self: *Self, expected: ?Type.Id, expr: Parser.Ast.Expr.Id) InnerErr
 
     var val = switch (self.ast.expr_store.get(expr)) {
         .BuiltinType => |b| Value.ty(Type.Builtin.expand(b).asType()),
-        .Int => |i| Value{ .type = Type.ctint_lit, .data = .{ .int = i } },
+        .Int => |i| Value{ .type = expected orelse Type.ctint_lit, .data = .{ .int = i } },
         .Bool => |b| Value{ .type = Type.bool_lit, .data = .{ .bool = b } },
         .Ret => |r| try self.checkRet(r),
         .Binary => |o| try self.checkBinary(o),
@@ -388,6 +396,7 @@ fn checkExpr(self: *Self, expected: ?Type.Id, expr: Parser.Ast.Expr.Id) InnerErr
         .Var => |v| try self.checkVar(v),
         .Call => |c| try self.checkCall(c),
         .If => |i| try self.checkIf(expected, i),
+        .Parens => |p| try self.checkExpr(expected, p),
         inline else => |val, tag| std.debug.panic("todo: {any} {any}", .{ tag, val }),
     };
 
@@ -408,7 +417,7 @@ fn checkIf(self: *Self, expected: ?Type.Id, i: Parser.Ast.Expr.If) InnerError!Va
         return Value{};
     }
 
-    var then = self.checkExpr(null, i.then) catch Value.never_lit;
+    var then = self.checkExpr(expected, i.then) catch Value.never_lit;
     var els = if (i.els) |e| self.checkExpr(then.type, e) catch Value.never_lit else null;
     then.type = if (els) |e| Type.unify(then.type, e.type) orelse @panic("todo") else then.type;
 

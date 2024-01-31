@@ -12,6 +12,18 @@ pub const EmmitConfig = struct {
     ommit_frame_pointer: bool = false,
 };
 
+fn declLabel(self: Label, writer: anytype, main: []const u8) !void {
+    if (self == 0) {
+        try writer.print("{s}:\n", .{main});
+    } else {
+        try writer.print("L{x}:\n", .{self});
+    }
+}
+
+fn useLabel(self: Label, writer: anytype) !void {
+    try writer.print("L{x}", .{self});
+}
+
 fn Emmiter(comptime W: type) type {
     return struct {
         const EThis = @This();
@@ -34,7 +46,7 @@ fn Emmiter(comptime W: type) type {
 
         pub fn writePrologue(self: *EThis) !void {
             var used_regs = self.regs;
-            while (used_regs.next()) |reg| try self.writeInstr(Instr{ .Push = .{ .Reg = reg } });
+            while (used_regs.next()) |reg| try self.writer.print("    push {s}\n", .{@tagName(reg)});
 
             if (!self.config.ommit_frame_pointer) {
                 try self.writeLine("push rbp");
@@ -55,37 +67,37 @@ fn Emmiter(comptime W: type) type {
             }
 
             var used_regs = self.regs;
-            while (used_regs.nextBack()) |reg| try self.writeInstr(Instr{ .Pop = .{ .Reg = reg } });
+            while (used_regs.nextBack()) |reg| try self.writer.print("    pop {s}\n", .{@tagName(reg)});
 
             try self.writeLine("ret");
         }
 
-        pub fn writeFnLabel(self: *EThis, label: Label) !void {
-            if (label == 0) {
-                try self.writer.print("{s}:\n", .{self.config.entry});
-            } else {
-                try self.writer.print("L{x}:\n", .{label});
-            }
+        pub fn writeLabel(self: *EThis, label: Label) !void {
+            try declLabel(label, self.writer, self.config.entry);
         }
 
-        pub fn writeInstrs(self: *EThis, instrs: []Instr) !void {
-            for (instrs) |instr| {
-                if (instr == .Ret) {
+        pub fn writeInstrs(self: *EThis, instrs: []FuncBuilder.TypedInstr, types: *const Types) !void {
+            for (instrs) |ty| {
+                if (ty.instr == .Ret) {
                     try self.printLine("jmp L{x}", .{self.epilogue});
                     continue;
                 }
-                try self.writeInstr(instr);
+                try self.writeInstr(ty, types);
             }
         }
 
-        fn writeInstr(self: *EThis, instr: Instr) !void {
-            try self.writer.writeAll("    ");
-            try instr.write(self.stack_size, self.config.entry, self.writer);
-            try self.writer.writeAll("\n");
-        }
+        fn writeInstr(self: *EThis, ty: FuncBuilder.TypedInstr, types: *const Types) !void {
+            var ctx = .{
+                .stack_size = self.stack_size,
+                .entrypoint = self.config.entry,
+                .writer = self.writer,
+                .types = types,
+                .type = ty.type,
+            };
 
-        fn writeLabel(self: *EThis, label: Label) !void {
-            try self.writer.print("L{x}:\n", .{label});
+            try self.writer.writeAll("    ");
+            try ty.instr.write(&ctx);
+            try self.writer.writeAll("\n");
         }
 
         fn writeLine(self: *EThis, line: []const u8) !void {
@@ -146,40 +158,30 @@ pub const Instr = union(enum) {
     Set: Set,
     Ret,
 
-    pub fn write(self: Instr, stack_size: usize, entrypoint: []const u8, writer: anytype) !void {
+    pub fn write(self: Instr, ctx: anytype) !void {
         switch (self) {
-            .Label => |l| try writer.print("L{x}:", .{l}),
+            .Label => |l| try ctx.writer.print("L{x}:", .{l}),
             inline else => |v, t| {
                 const Ty = @TypeOf(v);
 
-                var ctx = .{
-                    .stack_size = stack_size,
-                    .entrypoint = entrypoint,
-                    .writer = writer,
-                };
-
                 if (Ty != void and Ty != Label and @hasDecl(Ty, "writeFull")) {
-                    try v.writeFull(&ctx);
+                    try v.writeFull(ctx);
                     return;
                 }
 
                 const name = @tagName(t);
                 comptime var low_name: [name.len]u8 = undefined;
                 inline for (&low_name, name) |*d, s| d.* = comptime std.ascii.toLower(s);
-                try writer.writeAll(&low_name);
+                try ctx.writer.writeAll(&low_name);
 
                 if (Ty == void) return;
 
-                try writer.writeByte(' ');
+                try ctx.writer.writeByte(' ');
 
                 if (Ty == Label) {
-                    if (v == 0) {
-                        try writer.print("{s}", .{entrypoint});
-                    } else {
-                        try writer.print("L{x}", .{v});
-                    }
+                    try useLabel(v, ctx.writer);
                 } else {
-                    try v.write(&ctx);
+                    try v.write(ctx);
                 }
             },
         }
@@ -237,7 +239,8 @@ pub const Reg = enum {
     }
 
     pub fn write(self: @This(), ctx: anytype) !void {
-        try ctx.writer.writeAll(@tagName(self));
+        const bitSize = ctx.types.bitSizeOf(ctx.type);
+        try ctx.writer.writeAll(self.sizedName(bitSize));
     }
 
     pub fn asByteReg(self: Reg) []const u8 {
@@ -245,6 +248,30 @@ pub const Reg = enum {
             inline .rax, .rbx, .rcx, .rdx => |t| @tagName(t)[1..2] ++ "l",
             inline .rdi, .rsi, .rbp, .rsp => |t| @tagName(t)[1..] ++ "l",
             inline else => |t| @tagName(t) ++ "b",
+        };
+    }
+
+    pub fn asWordReg(self: Reg) []const u8 {
+        return switch (self) {
+            inline .rax, .rbx, .rcx, .rdx, .rdi, .rsi, .rbp, .rsp => |t| @tagName(t)[1..],
+            inline else => |t| @tagName(t) ++ "w",
+        };
+    }
+
+    pub fn asDwordReg(self: Reg) []const u8 {
+        return switch (self) {
+            inline .rax, .rbx, .rcx, .rdx, .rdi, .rsi, .rbp, .rsp => |t| "e" ++ @tagName(t)[1..],
+            inline else => |t| @tagName(t) ++ "d",
+        };
+    }
+
+    pub fn sizedName(self: Reg, size: usize) []const u8 {
+        return switch (size) {
+            1...8 => self.asByteReg(),
+            9...16 => self.asWordReg(),
+            17...32 => self.asDwordReg(),
+            33...64 => @tagName(self),
+            else => std.debug.panic("TODO: {any}", .{size}),
         };
     }
 };
@@ -394,14 +421,19 @@ const RegAlloc = struct {
 pub const FuncBuilder = struct {
     const default_spill = Reg.r12;
 
-    instrs: std.ArrayList(Instr),
+    const TypedInstr = struct {
+        instr: Instr,
+        type: Type.Id,
+    };
+
+    instrs: std.ArrayList(TypedInstr),
     stack_size: u32 = 0,
     pushed_stack_size: u32 = 0,
     peak_stack_size: u32 = 0,
     label_count: Label,
 
     pub fn init(alloc: std.mem.Allocator, first_label: Label) FuncBuilder {
-        return .{ .instrs = std.ArrayList(Instr).init(alloc), .label_count = first_label };
+        return .{ .instrs = std.ArrayList(TypedInstr).init(alloc), .label_count = first_label };
     }
 
     pub fn deinit(self: *FuncBuilder) void {
@@ -434,21 +466,14 @@ pub const FuncBuilder = struct {
         return self.pushed_stack_size;
     }
 
-    pub fn pushInstr(self: *FuncBuilder, instr: Instr) !void {
+    pub fn pushInstr(self: *FuncBuilder, ty: Type.Id, instr: Instr) !void {
         var final_instr = instr;
         if (final_instr.isUseless()) return;
-        try self.instrs.append(final_instr);
+        try self.instrs.append(.{ .instr = final_instr, .type = ty });
     }
 
-    pub fn emmit(self: *FuncBuilder, writer: anytype, func_id: Label, regs: RegAlloc.UsedIter, config: EmmitConfig) !void {
-        std.debug.assert(self.pushed_stack_size == 0);
-        var epilogue_label = self.allocLabel();
-        var emmiter = Emmiter(@TypeOf(writer)).init(writer, epilogue_label, self.stack_size, regs, config);
-
-        try emmiter.writeFnLabel(func_id);
-        try emmiter.writePrologue();
-        try emmiter.writeInstrs(self.instrs.items);
-        try emmiter.writeEpilogue();
+    pub fn pushInstrUntyped(self: *FuncBuilder, instr: Instr) !void {
+        try self.pushInstr(Type.usize_lit, instr);
     }
 
     pub fn clear(self: *FuncBuilder) void {
@@ -582,7 +607,22 @@ fn gen(self: *Self, writer: anytype) !void {
         switch (self.ast.item_store.get(item)) {
             .Func => |f| {
                 try self.genFunc(f);
-                try self.fb.emmit(writer, item.index, self.regs.usedIter(), .{});
+
+                std.debug.assert(self.fb.pushed_stack_size == 0);
+                var epilogue_label = self.fb.allocLabel();
+                var emmiter = Emmiter(@TypeOf(writer)).init(
+                    writer,
+                    epilogue_label,
+                    self.fb.stack_size,
+                    self.regs.usedIter(),
+                    .{},
+                );
+
+                try emmiter.writeLabel(item.index);
+                try emmiter.writePrologue();
+                try emmiter.writeInstrs(self.fb.instrs.items, self.types);
+                try emmiter.writeEpilogue();
+
                 self.regs = .{};
                 self.fb.clear();
             },
@@ -595,15 +635,13 @@ fn genFunc(self: *Self, func: Ast.Item.Func) Error!void {
 
     self.scope.clear(ret);
 
-    if (!ret.eql(Type.usize_lit) and !ret.eql(Type.bool_lit)) @panic("TODO: function return type");
-    //if (func.params.len > 0) @panic("TODO: function parameters");
     for (func.params, Reg.args[0..func.params.len]) |param, reg| {
         const value = self.types.getValue(param.type);
         const ref = self.scope.nextSlot();
         std.debug.assert(self.regs.allocSpecific(ref, reg) == null);
         _ = try self.scope.addSlot(.{
             .value = .{ .Reg = reg },
-            .type = value.type,
+            .type = value.data.type,
             .temorary = false,
         });
         try self.scope.addSymbol(.{ .ref = ref });
@@ -664,6 +702,7 @@ fn genExpr(self: *Self, expr: Ast.Expr.Id) InnerError!?Scope.Ref {
             .temorary = false,
         }),
         .Call => |c| try self.genCall(c),
+        .Parens => |p| try self.genExpr(p),
         inline else => |v, t| std.debug.panic("TODO: {any} {any}", .{ t, v }),
     };
 }
@@ -681,19 +720,19 @@ fn genIf(self: *Self, value: Typechk.Value, i: Ast.Expr.If) InnerError!?Scope.Re
     const end_label = self.fb.allocLabel();
 
     const cond = (try self.genExpr(i.cond)).?;
-    try self.fb.pushInstr(.{ .Cmp = .{ .dst = self.scope.getSlot(cond).value, .src = .{ .Imm = 0 } } });
-    try self.fb.pushInstr(.{ .Je = else_label orelse end_label });
+    try self.fb.pushInstr(Type.bool_lit, .{ .Cmp = .{ .dst = self.scope.getSlot(cond).value, .src = .{ .Imm = 0 } } });
+    try self.fb.pushInstrUntyped(.{ .Je = else_label orelse end_label });
 
     if (self.genScopedExpr(i.then)) |then| {
         const els = i.els orelse {
-            try self.fb.pushInstr(.{ .Label = end_label });
+            try self.pushLabel(end_label);
             return null;
         };
 
         const opt_ret = if (then) |th| try self.ensureTemporary(th) else null;
-        try self.fb.pushInstr(.{ .Jmp = end_label });
+        try self.fb.pushInstrUntyped(.{ .Jmp = end_label });
 
-        try self.fb.pushInstr(.{ .Label = else_label.? });
+        try self.pushLabel(else_label.?);
         const elsr = self.genScopedExpr(els) catch |err| switch (err) {
             error.Returned => return opt_ret,
             else => |e| return e,
@@ -701,11 +740,8 @@ fn genIf(self: *Self, value: Typechk.Value, i: Ast.Expr.If) InnerError!?Scope.Re
 
         const ret = opt_ret orelse return null;
 
-        try self.fb.pushInstr(.{ .Mov = .{
-            .dst = self.scope.getSlot(ret).value,
-            .src = self.scope.getSlot(elsr.?).value,
-        } });
-        try self.fb.pushInstr(.{ .Label = end_label });
+        try self.pushMov(elsr.?, ret);
+        try self.pushLabel(end_label);
         self.scope.slots.items.len -= 1;
 
         return ret;
@@ -714,7 +750,7 @@ fn genIf(self: *Self, value: Typechk.Value, i: Ast.Expr.If) InnerError!?Scope.Re
         else => |e| return e,
     }
 
-    try self.fb.pushInstr(.{ .Label = else_label orelse end_label });
+    try self.pushLabel(else_label orelse end_label);
     const els = i.els orelse return null;
     const opt_elsr = self.genScopedExpr(els) catch |err| switch (err) {
         error.Returned => return null,
@@ -722,19 +758,29 @@ fn genIf(self: *Self, value: Typechk.Value, i: Ast.Expr.If) InnerError!?Scope.Re
     };
     const elsr = opt_elsr orelse return null;
     const ret = try self.ensureTemporary(elsr);
-    try self.fb.pushInstr(.{ .Label = end_label });
+    try self.pushLabel(end_label);
 
     return ret;
+}
+
+fn pushLabel(self: *Self, label: Label) !void {
+    try self.fb.pushInstrUntyped(.{ .Label = label });
+}
+
+fn pushMov(self: *Self, scr: Scope.Ref, dst: Scope.Ref) !void {
+    const src_loc = self.scope.getSlot(scr);
+    const dst_loc = self.scope.getSlot(dst);
+    try self.fb.pushInstr(
+        dst_loc.type,
+        .{ .Mov = .{ .dst = dst_loc.value, .src = src_loc.value } },
+    );
 }
 
 fn ensureTemporary(self: *Self, ref: Scope.Ref) !Scope.Ref {
     const current = self.scope.getSlot(ref);
     if (current.temorary) return ref;
     const new = try self.allocRegPush(current.type, true);
-    try self.fb.pushInstr(.{ .Mov = .{
-        .dst = self.scope.getSlot(new).value,
-        .src = current.value,
-    } });
+    try self.pushMov(ref, new);
     return new;
 }
 
@@ -758,12 +804,13 @@ fn genCall(self: *Self, c: Ast.Expr.Call) InnerError!?Scope.Ref {
 
     const func = self.types.getValue(c.callee).data.decl;
     const label = func.index;
-    try self.fb.pushInstr(.{ .Call = label });
+    try self.fb.pushInstrUntyped(.{ .Call = label });
 
     try self.popFrame(frame, false);
 
     const ref = try self.allocRegPush(self.scope.ret, true);
-    try self.fb.pushInstr(.{ .Mov = .{ .dst = self.scope.getSlot(ref).value, .src = .{ .Reg = .rax } } });
+    const ref_loc = self.scope.getSlot(ref);
+    try self.fb.pushInstr(ref_loc.type, .{ .Mov = .{ .dst = ref_loc.value, .src = .{ .Reg = .rax } } });
 
     return ref;
 }
@@ -775,7 +822,7 @@ fn allocRegPush(self: *Self, ty: Type.Id, temporary: bool) !Scope.Ref {
     }
 
     const target = self.regs.spill(ref);
-    try self.fb.pushInstr(.{ .Push = .{ .Reg = target.reg } });
+    try self.fb.pushInstr(ty, .{ .Push = .{ .Reg = target.reg } });
     std.debug.assert(self.scope.getSlot(target.spill).value.spill(self.fb.pushStack(8)) == target.reg);
     return try self.scope.addSlot(.{
         .value = .{ .Spilled = target },
@@ -787,13 +834,14 @@ fn allocRegPush(self: *Self, ty: Type.Id, temporary: bool) !Scope.Ref {
 fn allocRegPushSpecific(self: *Self, ty: Type.Id, reg: Reg) !Scope.Ref {
     const ref = self.scope.nextSlot();
     if (self.regs.allocSpecific(ref, reg)) |current| {
-        std.debug.assert(switch (self.scope.getSlot(current).value) {
+        const current_loc = self.scope.getSlot(current);
+        std.debug.assert(switch (current_loc.value) {
             .Imm => false,
             .Reg => |r| reg == r,
             .Stack => false,
             .Spilled => |p| reg == p.reg,
         });
-        try self.fb.pushInstr(.{ .Push = self.scope.getSlot(current).value });
+        try self.fb.pushInstr(current_loc.type, .{ .Push = current_loc.value });
         _ = try self.scope.addSlot(.{
             .value = .{ .Spilled = .{ .reg = reg, .spill = current } },
             .type = ty,
@@ -813,12 +861,9 @@ fn allocRegPushSpecific(self: *Self, ty: Type.Id, reg: Reg) !Scope.Ref {
 fn prepareCall(self: *Self, args: []const Ast.Expr.Id) InnerError!void {
     for (args, Reg.args[0..args.len]) |arg, reg| {
         const value = (try self.genExpr(arg)).?;
-        const loc = self.scope.getSlot(value).value;
-        const regv = try self.allocRegPushSpecific(self.scope.getSlot(value).type, reg);
-        try self.fb.pushInstr(.{ .Mov = .{
-            .dst = self.scope.getSlot(regv).value,
-            .src = loc,
-        } });
+        const loc = self.scope.getSlot(value);
+        const regv = try self.allocRegPushSpecific(loc.type, reg);
+        try self.pushMov(value, regv);
     }
 }
 
@@ -840,23 +885,18 @@ fn genMathOp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
             std.mem.swap(Scope.Ref, &lhs, &rhs);
             break :blk;
         }
-
-        const ref = try self.allocRegPush(self.scope.getSlot(lhs).type, true);
-        try self.fb.pushInstr(.{ .Mov = .{
-            .dst = self.scope.getSlot(ref).value,
-            .src = self.scope.getSlot(lhs).value,
-        } });
-        lhs = ref;
+        lhs = try self.ensureTemporary(lhs);
     }
 
+    const ty = self.scope.getSlot(lhs).type;
     const lhs_loc = self.scope.getSlot(lhs).value;
     const rhs_loc = self.scope.getSlot(rhs).value;
 
     switch (b.op) {
-        .Add => try self.fb.pushInstr(.{ .Add = .{ .dst = lhs_loc, .src = rhs_loc } }),
-        .Sub => try self.fb.pushInstr(.{ .Sub = .{ .dst = lhs_loc, .src = rhs_loc } }),
+        .Add => try self.fb.pushInstr(ty, .{ .Add = .{ .dst = lhs_loc, .src = rhs_loc } }),
+        .Sub => try self.fb.pushInstr(ty, .{ .Sub = .{ .dst = lhs_loc, .src = rhs_loc } }),
         else => {
-            try self.fb.pushInstr(.{ .Cmp = .{ .dst = lhs_loc, .src = rhs_loc } });
+            try self.fb.pushInstr(Type.bool_lit, .{ .Cmp = .{ .dst = lhs_loc, .src = rhs_loc } });
             const set: Instr.Set.Cc = switch (b.op) {
                 .Eq => .e,
                 .Ne => .ne,
@@ -867,7 +907,7 @@ fn genMathOp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
                 else => unreachable,
             };
             const ref = try self.allocRegPush(Type.bool_lit, true);
-            try self.fb.pushInstr(.{ .Set = .{ .dst = self.scope.getSlot(ref).value.Reg, .cc = set } });
+            try self.fb.pushInstrUntyped(.{ .Set = .{ .dst = self.scope.getSlot(ref).value.Reg, .cc = set } });
         },
     }
 
@@ -880,27 +920,9 @@ fn genMathOp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
 
 fn genAssign(self: *Self, binary: Ast.Expr.Binary) InnerError!?Scope.Ref {
     const target = (try self.genExpr(binary.lhs)).?;
-
-    if (self.scope.getSlot(target).value == .Imm) {
-        const new = try self.allocRegPush(self.scope.getSlot(target).type, false);
-        try self.fb.pushInstr(.{ .Mov = .{
-            .dst = self.scope.getSlot(new).value,
-            .src = self.scope.getSlot(target).value,
-        } });
-        self.scope.getSlot(target).value = self.scope.getSlot(new).value;
-        switch (self.scope.getSlot(target).value) {
-            .Reg => |r| self.regs.restore(r, target),
-            .Spilled => |p| self.regs.restore(p.reg, target),
-            else => {},
-        }
-        self.scope.slots.items.len -= 1;
-    }
-
     const value = (try self.genExpr(binary.rhs)).?;
-    const target_loc = self.scope.getSlot(target).value;
-    const value_loc = self.scope.getSlot(value).value;
 
-    try self.fb.pushInstr(.{ .Mov = .{ .dst = target_loc, .src = value_loc } });
+    try self.pushMov(value, target);
 
     return null;
 }
@@ -910,9 +932,13 @@ fn genIdent(self: *Self, ident: Ast.Ident) InnerError!?Scope.Ref {
 }
 
 fn genVar(self: *Self, variable: Ast.Expr.Var) InnerError!?Scope.Ref {
-    const rt_value = (try self.genExpr(variable.init)).?;
+    var rt_value = (try self.genExpr(variable.init)).?;
+    const slot = self.scope.getSlot(rt_value);
     const value = self.types.getValue(variable.init);
     if (value.is_runtime) {
+        slot.temorary = false;
+    } else {
+        rt_value = try self.ensureTemporary(rt_value);
         self.scope.getSlot(rt_value).temorary = false;
     }
     try self.scope.addSymbol(.{ .ref = rt_value });
@@ -921,10 +947,10 @@ fn genVar(self: *Self, variable: Ast.Expr.Var) InnerError!?Scope.Ref {
 
 fn genRet(self: *Self, ret: Ast.Expr.Id) InnerError!?Scope.Ref {
     const value = (try self.genExpr(ret)).?;
-    const loc = self.scope.getSlot(value).value;
-    try self.fb.pushInstr(.{ .Sub = .{ .dst = .{ .Reg = .rsp }, .src = .{ .Imm = self.fb.pushed_stack_size } } });
-    try self.fb.pushInstr(.{ .Mov = .{ .dst = .{ .Reg = .rax }, .src = loc } });
-    try self.fb.pushInstr(.Ret);
+    const loc = self.scope.getSlot(value);
+    try self.fb.pushInstr(Type.usize_lit, .{ .Sub = .{ .dst = .{ .Reg = .rsp }, .src = .{ .Imm = self.fb.pushed_stack_size } } });
+    try self.fb.pushInstr(loc.type, .{ .Mov = .{ .dst = .{ .Reg = .rax }, .src = loc.value } });
+    try self.fb.pushInstrUntyped(.Ret);
     return InnerError.Returned;
 }
 
@@ -939,10 +965,11 @@ fn popFrame(self: *Self, frame: Scope.Frame, comptime shift_last_slot: bool) !if
                 _ = self.fb.freeStack(8);
             },
             .Spilled => |p| {
+                const spill = self.scope.getSlot(p.spill);
                 _ = self.fb.popStack(8);
-                try self.fb.pushInstr(.{ .Pop = .{ .Reg = p.reg } });
+                try self.fb.pushInstr(spill.type, .{ .Pop = .{ .Reg = p.reg } });
                 self.regs.restore(p.reg, p.spill);
-                self.scope.getSlot(p.spill).value.restore(p.reg);
+                spill.value.restore(p.reg);
             },
         }
     }
@@ -965,9 +992,8 @@ fn popFrame(self: *Self, frame: Scope.Frame, comptime shift_last_slot: bool) !if
 fn performTest(writer: anytype, comptime name: []const u8, alloc: std.mem.Allocator, src: []const u8) !void {
     var ast = try Parser.parse(alloc, src);
     defer ast.deinit(alloc);
-    for (ast.errors.items) |err| std.log.warn("{any}", .{err});
+    for (ast.errors.items) |err| try writer.print("{any}", .{err});
     try std.testing.expect(ast.errors.items.len == 0);
-    try std.testing.expect(ast.items.items.len == 2);
 
     var printer = Parser.Printer(@TypeOf(writer)).init(&ast, writer, src);
     try printer.print();
@@ -1038,83 +1064,114 @@ fn run(writer: anytype, args: []const []const u8) !void {
 }
 
 test "print" {
-    try garbage.printtest("fib-iter-recur", performTest,
-        \\fn main() usize {
-        \\    return fib(10, 0, 1);
-        \\}
-        \\
-        \\fn fib(n: usize, a: usize, b: usize) usize {
-        \\    if (n == 0) return a;
-        \\    return fib(n - 1, b, a + b);
-        \\}
-    );
+    const tasks = .{
+        .{
+            "different-integer-sizes",
+            \\fn main() u8 {
+            \\    return 254 + foo();
+            \\}
+            \\fn foo() u8 {
+            \\    return 2;
+            \\}
+        },
+        .{
+            "parens",
+            \\fn main() usize {
+            \\    return (3 - 2) + 1;
+            \\}
+        },
+        .{
+            "parens-2",
+            \\fn main() usize {
+            \\    return 3 - (2 + 1);
+            \\}
+        },
+        .{
+            "fib-iter-recur",
+            \\fn main() usize {
+            \\    return fib(10, 0, 1);
+            \\}
+            \\
+            \\fn fib(n: usize, a: usize, b: usize) usize {
+            \\    if (n == 0) return a;
+            \\    return fib(n - 1, b, a + b);
+            \\}
+        },
+        .{
+            "fib-recur",
+            \\fn main() usize {
+            \\    return fib(10);
+            \\}
+            \\
+            \\fn fib(n: usize) usize {
+            \\    if (n < 2) return n;
+            \\    return fib(n - 1) + fib(n - 2);
+            \\}
+        },
+        .{
+            "spilling",
+            \\fn main() usize {
+            \\    const i = 1 + 2;
+            \\    const j = i + 3;
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    return k;
+            \\}
+            \\
+            \\fn foo(a: usize) usize {
+            \\    return a + a + 4;
+            \\}
+        },
+        .{
+            "simple-if",
+            \\fn main() usize {
+            \\    return if (false) 1 else if (foo()) 2 else 3;
+            \\}
+            \\
+            \\fn foo() bool {
+            \\    return true;
+            \\}
+        },
+        .{
+            "if-and-variable",
+            \\fn main() usize {
+            \\    var a: usize = if (false) 1 else if (foo()) 2 else 3;
+            \\    a = a + 1;
+            \\    return a;
+            \\}
+            \\
+            \\fn foo() bool {
+            \\    return false;
+            \\}
+        },
+    };
 
-    try garbage.printtest("fib-recur", performTest,
-        \\fn main() usize {
-        \\    return fib(10);
-        \\}
-        \\
-        \\fn fib(n: usize) usize {
-        \\    if (n < 2) return n;
-        \\    return fib(n - 1) + fib(n - 2);
-        \\}
-    );
-
-    try garbage.printtest("spilling", performTest,
-        \\fn main() usize {
-        \\    const i = 1 + 2;
-        \\    const j = i + 3;
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    var k: usize = j;
-        \\    k = k + 5 + foo(4);
-        \\    return k;
-        \\}
-        \\
-        \\fn foo(a: usize) usize {
-        \\    return a + a + 4;
-        \\}
-    );
-
-    try garbage.printtest("simple-if", performTest,
-        \\fn main() usize {
-        \\    return if (false) 1 else if (foo()) 2 else 3;
-        \\}
-        \\
-        \\fn foo() bool {
-        \\    return true;
-        \\}
-    );
-
-    try garbage.printtest("if-and-variable", performTest,
-        \\fn main() usize {
-        \\    var a: usize = if (false) 1 else if (foo()) 2 else 3;
-        \\    a = a + 1;
-        \\    return a;
-        \\}
-        \\
-        \\fn foo() bool {
-        \\    return false;
-        \\}
-    );
+    inline for (tasks) |task| {
+        garbage.printtest(task[0], performTest, task[1]) catch |err| switch (err) {
+            error.DiffFailed => {},
+            else => |e| return e,
+        };
+    }
 }

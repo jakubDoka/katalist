@@ -232,28 +232,6 @@ pub fn Unmanaged(comptime T: type) type {
             unreachable;
         }
 
-        pub fn find_or_push(self: *Self, alloc: std.mem.Allocator, value: T) std.mem.Allocator.Error!Index {
-            switch (value) {
-                inline else => |val, tag| {
-                    if (Index.encodeStatic(tag, val)) |id| return id;
-
-                    inline for (meta.field_names, meta.unions, meta.union_types) |nm, un, un_ty| {
-                        inline for (un.fields) |f| {
-                            if (f.type != @TypeOf(val)) continue;
-                            for (@field(self.storage, nm).items, 0..) |item, i| {
-                                if (std.meta.eql(val, @field(item, f.name))) return .{ .tag = tag, .index = @intCast(i) };
-                            }
-                            var v = @unionInit(un_ty, f.name, val);
-                            try @field(self.storage, nm).append(alloc, v);
-                            return .{ .tag = tag, .index = @intCast(@field(self.storage, nm).items.len - 1) };
-                        }
-                    }
-                },
-            }
-
-            unreachable;
-        }
-
         pub fn get(self: *const Self, id: Index) T {
             switch (id.tag) {
                 inline else => |tag| {
@@ -263,7 +241,7 @@ pub fn Unmanaged(comptime T: type) type {
                     inline for (meta.field_names, meta.unions) |nm, un| {
                         inline for (un.fields) |f| {
                             if (f.type == field.type) {
-                                return @unionInit(T, f.name, @field(@field(self.storage, nm).items[id.index], f.name));
+                                return @unionInit(T, field.name, @field(@field(self.storage, nm).items[id.index], f.name));
                             }
                         }
                     }
@@ -282,7 +260,7 @@ pub fn Unmanaged(comptime T: type) type {
                     inline for (meta.field_names, meta.unions) |nm, un| {
                         inline for (un.fields) |f| {
                             if (f.type == field.type) {
-                                return @unionInit(AsPtr, f.name, &@field(@field(self.storage, nm).items[id.index], f.name));
+                                return @unionInit(AsPtr, field.name, &@field(@field(self.storage, nm).items[id.index], f.name));
                             }
                         }
                     }
@@ -313,8 +291,10 @@ pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
     return struct {
         const Self = @This();
         const meta: EnumMetadata = ES.meta;
+        const is_debug = @import("builtin").mode == .Debug;
+        const BaseType = if (is_debug) ?T else T;
 
-        const Lane = std.ArrayListUnmanaged(?T);
+        const Lane = std.ArrayListUnmanaged(BaseType);
         const Storage = b: {
             var fields: [meta.field_names.len]Type.StructField = undefined;
             for (meta.field_names, &fields) |nm, *f| {
@@ -343,7 +323,9 @@ pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
             inline for (meta.field_names) |nm| {
                 @field(storage, nm) = .{};
                 try @field(storage, nm).resize(alloc, @field(based_on.storage, nm).items.len);
-                for (@field(storage, nm).items) |*slot| slot.* = null;
+                if (is_debug) {
+                    for (@field(storage, nm).items) |*item| item.* = null;
+                }
             }
             return .{ .storage = storage };
         }
@@ -352,7 +334,7 @@ pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
             inline for (meta.field_names) |nm| @field(self.storage, nm).deinit(alloc);
         }
 
-        pub fn at(self: *Self, id: meta.index) ?*?T {
+        pub fn at(self: *Self, id: meta.index) ?*BaseType {
             return switch (id.tag) {
                 inline else => |tag| self.dispatch(tag, id.index),
             };
@@ -376,7 +358,7 @@ pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
             return null;
         }
 
-        fn dispatch(self: *Self, comptime tag: std.meta.Tag(meta.target), index: usize) ?*?T {
+        fn dispatch(self: *Self, comptime tag: std.meta.Tag(meta.target), index: usize) ?*BaseType {
             const field = std.meta.fieldInfo(meta.target, tag);
             inline for (meta.field_names, meta.unions) |nm, un| {
                 inline for (un.fields) |f| {
