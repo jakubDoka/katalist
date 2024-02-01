@@ -5,6 +5,25 @@ const Types = Typechk.Module;
 const Parser = @import("../Parser.zig");
 const Ast = Parser.Ast;
 
+pub const SigRegAlloc = struct {
+    available: []u4,
+
+    pub const general_args: SigRegAlloc = .{ .available = &[_]u4{ 5, 4, 2, 1, 8, 9 } };
+    pub const simd_args: SigRegAlloc = .{ .available = &[_]u4{ 0, 1, 2, 3, 4, 5, 6, 7 } };
+    pub const general_rets: SigRegAlloc = .{ .available = &[_]u4{ 0, 2 } };
+    pub const simd_rets: SigRegAlloc = .{ .available = &[_]u4{ 0, 1 } };
+};
+
+pub const SigMemoryAlloc = struct {
+    offset: usize = 0,
+
+    pub fn alloc(self: *SigMemoryAlloc, size: usize) usize {
+        const result = self.offset;
+        self.offset += std.math.ceilPowerOfTwo(usize, size) catch unreachable;
+        return result;
+    }
+};
+
 pub const Reg = packed struct(u8) {
     pub const Set = u32;
     pub const Index = u5;
@@ -12,12 +31,11 @@ pub const Reg = packed struct(u8) {
     pub const general_regs = makeSet(.{.{ 0, 15 }});
     pub const calee_saved = makeSet(.{ 3, 7, .{ 12, 15 } });
     pub const forbidden_registers = makeSet(.{6});
-    pub const general_args = [_]u4{ 5, 4, 2, 1, 8, 9 };
-    pub const simd_args = [_]u8{ 0, 1, 2, 3, 4, 5, 6, 7 };
     pub const caller_saved = ~calee_saved & ~forbidden_registers;
+
     pub const biggest_reg = 128;
     pub const pointer_width = 64;
-    pub const count: usize = 1 << 5;
+    pub const count = 1 << 5;
 
     pub const ret = cnst(false, 0);
 
