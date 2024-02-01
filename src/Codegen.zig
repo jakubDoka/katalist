@@ -6,6 +6,7 @@ const Typechk = @import("Typechk.zig");
 const Types = Typechk.Module;
 const Type = Typechk.Type;
 const garbage = @import("garbage.zig");
+//const RegAlloc = @import("Codegen/RegAlloc.zig");
 
 pub const EmmitConfig = struct {
     entry: []const u8 = "main",
@@ -948,8 +949,14 @@ fn genVar(self: *Self, variable: Ast.Expr.Var) InnerError!?Scope.Ref {
 fn genRet(self: *Self, ret: Ast.Expr.Id) InnerError!?Scope.Ref {
     const value = (try self.genExpr(ret)).?;
     const loc = self.scope.getSlot(value);
-    try self.fb.pushInstr(Type.usize_lit, .{ .Sub = .{ .dst = .{ .Reg = .rsp }, .src = .{ .Imm = self.fb.pushed_stack_size } } });
-    try self.fb.pushInstr(loc.type, .{ .Mov = .{ .dst = .{ .Reg = .rax }, .src = loc.value } });
+    try self.fb.pushInstr(Type.usize_lit, .{ .Sub = .{
+        .dst = .{ .Reg = .rsp },
+        .src = .{ .Imm = self.fb.pushed_stack_size },
+    } });
+    try self.fb.pushInstr(loc.type, .{ .Mov = .{
+        .dst = .{ .Reg = .rax },
+        .src = loc.value,
+    } });
     try self.fb.pushInstrUntyped(.Ret);
     return InnerError.Returned;
 }
