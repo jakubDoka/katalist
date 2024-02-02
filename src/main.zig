@@ -7,6 +7,7 @@ const Parser = @import("Parser.zig");
 const TypeCheck = @import("Typechk.zig");
 const Codegen = @import("Codegen.zig");
 const RegAlloc = @import("Codegen/RegAlloc.zig");
+const Storage = @import("Storage.zig");
 
 pub fn main() !void {
     // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)

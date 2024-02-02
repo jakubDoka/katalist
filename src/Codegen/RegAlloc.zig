@@ -12,6 +12,12 @@ pub const SigRegAlloc = struct {
     pub const simd_args: SigRegAlloc = .{ .available = &[_]u4{ 0, 1, 2, 3, 4, 5, 6, 7 } };
     pub const general_rets: SigRegAlloc = .{ .available = &[_]u4{ 0, 2 } };
     pub const simd_rets: SigRegAlloc = .{ .available = &[_]u4{ 0, 1 } };
+
+    pub fn alloc(self: *SigRegAlloc) !u4 {
+        if (self.available.len == 0) return error.IsMemory;
+        defer self.available = self.available[1..];
+        return self.available[0];
+    }
 };
 
 pub const SigMemoryAlloc = struct {
@@ -21,6 +27,52 @@ pub const SigMemoryAlloc = struct {
         const result = self.offset;
         self.offset += std.math.ceilPowerOfTwo(usize, size) catch unreachable;
         return result;
+    }
+};
+
+pub const AbiValue = union(enum) {
+    Reg: Reg,
+    RegPair: struct {
+        lo: Reg,
+        hi: Reg,
+    },
+    Memory: u32,
+};
+
+pub const SigAlloc = struct {
+    general_args: SigRegAlloc = SigRegAlloc.general_args,
+    simd_args: SigRegAlloc = SigRegAlloc.simd_args,
+    general_rets: SigRegAlloc = SigRegAlloc.general_rets,
+    simd_rets: SigRegAlloc = SigRegAlloc.simd_rets,
+    memory: SigMemoryAlloc = .{},
+
+    pub fn allocArg(self: *SigAlloc, classes: []const ArgClass, size: usize) AbiValue {
+        if (self.tryAllocArg(classes)) |v| return v;
+        return .{ .Memory = self.memory.alloc(size) };
+    }
+
+    fn tryAllocArg(self: *SigAlloc, classes: []const ArgClass) !AbiValue {
+        switch (classes.len) {
+            0 => return error.IsMemory,
+            1 => switch (classes[0]) {
+                .Integer => return .{ .Reg = try self.general_args.alloc() },
+                .Sse => return .{ .Reg = try self.simd_args.alloc() },
+                else => unreachable,
+            },
+            2 => switch (classes[0]) {
+                .Integer => {
+                    std.debug.assert(classes[1] == .Integer);
+                    return .{ .RegPair = .{
+                        .lo = try self.general_args.alloc(),
+                        .hi = try self.general_args.alloc(),
+                    } };
+                },
+                .Sse => {
+                    std.debug.assert(classes[1] == .SseUp);
+                    return .{ .Reg = try self.simd_args.alloc() };
+                },
+            },
+        }
     }
 };
 

@@ -2,12 +2,28 @@ const std = @import("std");
 const Type = std.builtin.Type;
 
 const BackingInt = u32;
+const Len = u16;
 
-pub fn isInlined(comptime Tag: type, comptime T: type) bool {
+const PackedSlice = packed struct(BackingInt) {
+    const Self = @This();
+
+    index: u20 = 0,
+    len: u12 = 0,
+
+    fn fromRange(start: usize, end: usize) Self {
+        return .{ .index = @intCast(start), .len = @intCast(end - start) };
+    }
+
+    fn slice(self: Self, comptime E: type, data: []const E) []const E {
+        return data[self.index .. self.index + self.len];
+    }
+};
+
+fn isInlined(comptime Tag: type, comptime T: type) bool {
     return @bitSizeOf(T) < @bitSizeOf(BackingInt) - @bitSizeOf(Tag);
 }
 
-pub fn UnionAsPtr(comptime T: type) type {
+fn UnionAsPtr(comptime T: type) type {
     comptime var meta = @typeInfo(T).Union;
     comptime var fields = meta.fields[0..meta.fields.len].*;
     for (&fields) |*field| {
@@ -19,13 +35,100 @@ pub fn UnionAsPtr(comptime T: type) type {
     return @Type(.{ .Union = meta });
 }
 
+fn UnionStorage(comptime T: type, comptime field_map: fn (ty: type) type) type {
+    const meta = @typeInfo(T).Union;
+    const Tag = meta.tag_type.?;
+
+    comptime var fields: [meta.fields.len]Type.StructField = undefined;
+    comptime var kept = 0;
+    for (meta.fields) |field| {
+        if (isInlined(Tag, field.type)) continue;
+
+        const Ty = field_map(field.type);
+        fields[kept] = .{
+            .name = field.name,
+            .type = Ty,
+            .alignment = @alignOf(Ty),
+            .default_value = null,
+            .is_comptime = false,
+        };
+        kept += 1;
+    }
+
+    return @Type(.{ .Struct = .{
+        .fields = fields[0..kept],
+        .layout = Type.ContainerLayout.Auto,
+        .decls = &.{},
+        .backing_integer = null,
+        .is_tuple = false,
+    } });
+}
+
+fn UnionPackedSlice(comptime T: type) type {
+    const field_map = struct {
+        fn lane(comptime _: type) type {
+            return PackedSlice;
+        }
+    }.lane;
+    return UnionStorage(T, field_map);
+}
+
+fn UnionView(comptime T: type) type {
+    const field_map = struct {
+        fn lane(comptime V: type) type {
+            return []const V;
+        }
+    }.lane;
+    return struct {
+        const Index = Id(std.meta.Tag(T));
+        const Self = @This();
+        const View = UnionStorage(T, field_map);
+
+        view: View,
+
+        pub fn get(self: *const Self, index: Index) T {
+            return switch (index.tag) {
+                inline else => |tag| {
+                    if (!@hasField(View, @tagName(tag))) return Index.decodeStatic(T, tag, index.index).?;
+                    const value = @field(self.view, @tagName(tag))[index.index];
+                    return @unionInit(T, @tagName(tag), value);
+                },
+            };
+        }
+
+        pub fn query(self: *const Self, comptime tag: std.meta.Tag(T)) []const std.meta.FieldType(T, tag) {
+            return @field(self.view, @tagName(tag));
+        }
+    };
+}
+
+fn UnionLen(comptime T: type) type {
+    const field_map = struct {
+        fn lane(comptime _: type) type {
+            return Len;
+        }
+    }.lane;
+    return UnionStorage(T, field_map);
+}
+
+fn UnionCheckpoint(comptime T: type) type {
+    const field_map = struct {
+        fn lane(comptime _: type) type {
+            return usize;
+        }
+    }.lane;
+    return UnionStorage(T, field_map);
+}
+
 pub fn Id(comptime T: type) type {
-    const Index = @Type(.{ .Int = .{
+    const Idx = @Type(.{ .Int = .{
         .signedness = std.builtin.Signedness.unsigned,
         .bits = @bitSizeOf(BackingInt) - @bitSizeOf(T),
     } });
 
     return packed struct(BackingInt) {
+        pub const Index = Idx;
+
         tag: T,
         index: Index,
 
@@ -79,210 +182,136 @@ pub fn Id(comptime T: type) type {
     };
 }
 
-const EnumMetadata = struct {
-    const Self = @This();
-
-    target: type,
-    index: type,
-    union_types: []type,
-    unions: []Type.Union,
-    field_names: [][]const u8,
-
-    pub fn construct(comptime T: type) Self {
-        const meta = @typeInfo(T).Union;
-        const Tag = meta.tag_type.?;
-
-        comptime var distinct_layout_count = meta.fields.len;
-        for (meta.fields, 0..) |field, i| {
-            if (isInlined(Tag, field.type)) {
-                distinct_layout_count -= 1;
-                continue;
-            }
-
-            for (i + 1..meta.fields.len) |j| {
-                if (@alignOf(field.type) == @alignOf(meta.fields[j].type) and
-                    @sizeOf(field.type) == @sizeOf(meta.fields[j].type))
-                {
-                    distinct_layout_count -= 1;
-                    break;
-                }
-            }
-        }
-
-        comptime var unions: [distinct_layout_count]Type.Union = undefined;
-        comptime var field_names: [distinct_layout_count][]const u8 = undefined;
-        comptime var size_and_align: [distinct_layout_count]struct { usize, usize } = undefined;
-        comptime var union_index = 0;
-
-        o: for (meta.fields) |field| {
-            if (isInlined(Tag, field.type)) {
-                continue;
-            }
-
-            for (unions[0..union_index], size_and_align[0..union_index]) |*un, sa| {
-                if (sa[0] == @alignOf(field.type) and sa[1] == @sizeOf(field.type)) {
-                    for (un.fields) |f| {
-                        if (f.type == field.type) {
-                            continue :o;
-                        }
-                    }
-
-                    const newField: Type.UnionField = .{
-                        .name = field.name,
-                        .type = field.type,
-                        .alignment = @alignOf(field.type),
-                    };
-                    un.fields = un.fields ++ .{newField};
-
-                    continue :o;
-                }
-            }
-
-            unions[union_index] = .{
-                .tag_type = null,
-                .fields = &.{.{ .name = field.name, .type = field.type, .alignment = @alignOf(field.type) }},
-                .layout = Type.ContainerLayout.Auto,
-                .decls = &[0]Type.Declaration{},
-            };
-
-            field_names[union_index] = field.name;
-            size_and_align[union_index] = .{ @alignOf(field.type), @sizeOf(field.type) };
-            union_index += 1;
-        }
-
-        comptime var union_types: [distinct_layout_count]type = undefined;
-        for (unions, &union_types) |un, *ty| {
-            ty.* = @Type(.{ .Union = un });
-        }
-
-        return .{
-            .target = T,
-            .index = Id(meta.tag_type.?),
-            .unions = &unions,
-            .field_names = &field_names,
-            .union_types = &union_types,
-        };
-    }
-
-    pub fn createStorage(comptime self: Self) type {
-        var storage: [self.unions.len]Type.StructField = undefined;
-        for (self.field_names, self.union_types, 0..) |nm, un, i| {
-            const ty = std.ArrayListUnmanaged(un);
-            storage[i] = .{
-                .name = nm,
-                .type = ty,
-                .alignment = @alignOf(ty),
-                .default_value = null,
-                .is_comptime = false,
-            };
-        }
-
-        return @Type(.{ .Struct = .{
-            .fields = &storage,
-            .layout = Type.ContainerLayout.Auto,
-            .decls = &.{},
-            .backing_integer = null,
-            .is_tuple = false,
-        } });
-    }
-};
-
 pub fn Unmanaged(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        pub const meta = EnumMetadata.construct(T);
-        pub const Storage = meta.createStorage();
-        const Index = meta.index;
+        pub const Storage = UnionStorage(T, std.ArrayListUnmanaged);
+        pub const Slice = UnionPackedSlice(T);
+        pub const Len = UnionLen(T);
+        pub const Checkpoint = UnionCheckpoint(T);
+        pub const View = UnionView(T);
+        pub const Index = Id(std.meta.Tag(T));
         pub const AsPtr = UnionAsPtr(T);
+        pub const Item = T;
 
         storage: Storage,
 
         pub fn init() Self {
             var storage: Storage = undefined;
-            inline for (meta.field_names) |nm| @field(storage, nm) = .{};
+            inline for (std.meta.fields(Storage)) |field| @field(storage, field.name) = .{};
             return .{ .storage = storage };
         }
 
         pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-            inline for (meta.field_names) |nm| @field(self.storage, nm).deinit(alloc);
+            inline for (std.meta.fields(Storage)) |field|
+                @field(self.storage, field.name).deinit(alloc);
         }
 
         pub fn clear(self: *Self) void {
-            inline for (meta.field_names) |nm| @field(self.storage, nm).items.len = 0;
+            inline for (std.meta.fields(Storage)) |field| {
+                @field(self.storage, field.name).items.len = 0;
+            }
         }
 
-        pub fn push(self: *Self, alloc: std.mem.Allocator, value: T) std.mem.Allocator.Error!Index {
+        pub fn pushAbsolute(
+            self: *Self,
+            alloc: std.mem.Allocator,
+            value: T,
+        ) std.mem.Allocator.Error!Index {
             switch (value) {
                 inline else => |val, tag| {
-                    if (Index.encodeStatic(tag, val)) |id| return id;
-
-                    inline for (meta.field_names, meta.unions, meta.union_types) |nm, un, un_ty| {
-                        inline for (un.fields) |f| {
-                            if (f.type == @TypeOf(val)) {
-                                var v = @unionInit(un_ty, f.name, val);
-                                try @field(self.storage, nm).append(alloc, v);
-                                return .{ .tag = tag, .index = @intCast(@field(self.storage, nm).items.len - 1) };
-                            }
-                        }
-                    }
+                    if (comptime isInline(tag)) return Index.encodeStatic(tag, val).?;
+                    const field = &@field(self.storage, @tagName(tag));
+                    try field.append(alloc, val);
+                    return .{ .tag = tag, .index = @intCast(field.items.len - 1) };
                 },
             }
-
-            unreachable;
         }
 
-        pub fn get(self: *const Self, id: Index) T {
+        pub fn push(
+            self: *Self,
+            alloc: std.mem.Allocator,
+            cp: Checkpoint,
+            value: T,
+        ) std.mem.Allocator.Error!Index {
+            switch (value) {
+                inline else => |val, tag| {
+                    if (comptime isInline(tag)) return Index.encodeStatic(tag, val).?;
+                    const field = &@field(self.storage, @tagName(tag));
+                    const base = @field(cp, @tagName(tag));
+                    try field.append(alloc, val);
+                    return .{ .tag = tag, .index = @intCast(field.items.len - 1 - base) };
+                },
+            }
+        }
+
+        pub fn drainInto(self: *Self, other: *Self, source: Checkpoint, alloc: std.mem.Allocator) !Slice {
+            var slice: Slice = undefined;
+            inline for (std.meta.fields(Storage)) |field| {
+                const src = &@field(self.storage, field.name);
+                const src_slice = @field(source, field.name);
+                const src_view = src.items[src_slice..];
+                const dst = &@field(other.storage, field.name);
+                const slc = &@field(slice, field.name);
+
+                slc.index = @intCast(dst.items.len);
+                slc.len = @intCast(src_view.len);
+                try dst.appendSlice(alloc, src_view);
+                src.items.len = src_slice;
+            }
+            return slice;
+        }
+
+        pub fn checkpoint(self: *const Self) Checkpoint {
+            var cp: Checkpoint = undefined;
+            inline for (std.meta.fields(Storage)) |field| {
+                @field(cp, field.name) = @field(self.storage, field.name).items.len;
+            }
+            return cp;
+        }
+
+        pub fn view(self: *Self, slice: Slice) View {
+            var vw: View = undefined;
+            inline for (std.meta.fields(Storage)) |field| {
+                const src = &@field(self.storage, field.name);
+                const dst = @field(slice, field.name);
+                @field(vw.view, field.name) = src.items[dst.index .. dst.index + dst.len];
+            }
+            return vw;
+        }
+
+        pub fn get(self: *Self, cp: Checkpoint, id: Index) AsPtr {
             switch (id.tag) {
                 inline else => |tag| {
-                    if (Index.decodeStatic(T, tag, id.index)) |val| return val;
-
-                    const field = std.meta.fieldInfo(T, tag);
-                    inline for (meta.field_names, meta.unions) |nm, un| {
-                        inline for (un.fields) |f| {
-                            if (f.type == field.type) {
-                                return @unionInit(T, field.name, @field(@field(self.storage, nm).items[id.index], f.name));
-                            }
-                        }
-                    }
+                    if (comptime isInline(tag)) return Index.decodeStatic(AsPtr, tag, id.index).?;
+                    const field = &@field(self.storage, @tagName(tag));
+                    const base = @field(cp, @tagName(tag));
+                    return @unionInit(AsPtr, @tagName(tag), &field.items[base + id.index]);
                 },
             }
-
-            unreachable;
         }
 
-        pub fn get_ptr(self: *Self, id: Index) AsPtr {
+        pub fn getAbsolute(self: *const Self, id: Index) AsPtr {
             switch (id.tag) {
                 inline else => |tag| {
-                    if (Index.decodeStatic(AsPtr, tag, id.index)) |val| return val;
-
-                    const field = std.meta.fieldInfo(T, tag);
-                    inline for (meta.field_names, meta.unions) |nm, un| {
-                        inline for (un.fields) |f| {
-                            if (f.type == field.type) {
-                                return @unionInit(AsPtr, field.name, &@field(@field(self.storage, nm).items[id.index], f.name));
-                            }
-                        }
-                    }
+                    if (comptime isInline(tag)) return Index.decodeStatic(AsPtr, tag, id.index).?;
+                    const field = &@field(self.storage, @tagName(tag));
+                    return @unionInit(AsPtr, @tagName(tag), &field.items[id.index]);
                 },
             }
-
-            unreachable;
         }
 
-        pub fn approxCountFor(self: *const Self, comptime D: type) usize {
-            inline for (meta.field_names, meta.unions) |nm, un| {
-                inline for (un.fields) |f| {
-                    if (f.type == D) {
-                        return @field(self.storage, nm).items.len;
-                    }
-                }
-            }
+        pub fn query(self: *const Self, comptime tag: std.meta.Tag(T)) []const std.meta.FieldType(T, tag) {
+            return @field(self.storage, @tagName(tag)).items;
         }
 
         pub fn nextId(self: *const Self, comptime tag: std.meta.Tag(T)) Index {
-            const field = std.meta.fieldInfo(T, tag);
-            return .{ .tag = tag, .index = @intCast(self.approxCountFor(field.type)) };
+            return .{ .tag = tag, .index = @intCast(self.query(tag).len) };
+        }
+
+        fn isInline(tag: std.meta.Tag(T)) bool {
+            return !@hasField(Storage, @tagName(tag));
         }
     };
 }
@@ -290,91 +319,60 @@ pub fn Unmanaged(comptime T: type) type {
 pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
     return struct {
         const Self = @This();
-        const meta: EnumMetadata = ES.meta;
         const is_debug = @import("builtin").mode == .Debug;
         const BaseType = if (is_debug) ?T else T;
-
-        const Lane = std.ArrayListUnmanaged(BaseType);
-        const Storage = b: {
-            var fields: [meta.field_names.len]Type.StructField = undefined;
-            for (meta.field_names, &fields) |nm, *f| {
-                f.* = .{
-                    .name = nm,
-                    .type = Lane,
-                    .alignment = @alignOf(Lane),
-                    .default_value = null,
-                    .is_comptime = false,
-                };
-            }
-
-            break :b @Type(.{ .Struct = .{
-                .fields = &fields,
-                .layout = Type.ContainerLayout.Auto,
-                .decls = &.{},
-                .backing_integer = null,
-                .is_tuple = false,
-            } });
-        };
+        const Storage = UnionStorage(ES.Item, lane);
 
         storage: Storage,
 
+        fn lane(comptime _: type) type {
+            return std.ArrayListUnmanaged(BaseType);
+        }
+
         pub fn init(based_on: *const ES, alloc: std.mem.Allocator) !Self {
             var storage: Storage = undefined;
-            inline for (meta.field_names) |nm| {
-                @field(storage, nm) = .{};
-                try @field(storage, nm).resize(alloc, @field(based_on.storage, nm).items.len);
+            inline for (std.meta.fields(Storage)) |nm| {
+                if (nm.type == void) continue;
+                @field(storage, nm.name) = .{};
+                try @field(storage, nm.name).resize(alloc, @field(based_on.storage, nm.name).items.len);
                 if (is_debug) {
-                    for (@field(storage, nm).items) |*item| item.* = null;
+                    for (@field(storage, nm.name).items) |*item| item.* = null;
                 }
             }
             return .{ .storage = storage };
         }
 
         pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-            inline for (meta.field_names) |nm| @field(self.storage, nm).deinit(alloc);
+            inline for (std.meta.fields(Storage)) |nm| {
+                if (nm.type == void) continue;
+                @field(self.storage, nm.name).deinit(alloc);
+            }
         }
 
-        pub fn at(self: *Self, id: meta.index) ?*BaseType {
+        pub fn at(self: *Self, id: ES.Index) ?*BaseType {
             return switch (id.tag) {
-                inline else => |tag| self.dispatch(tag, id.index),
+                inline else => |tag| {
+                    if (!@hasField(Storage, @tagName(tag))) return null;
+                    const field = &@field(self.storage, @tagName(tag));
+                    return &field.items[id.index];
+                },
             };
         }
 
-        pub fn get(self: *const Self, id: meta.index) ?T {
+        pub fn get(self: *const Self, id: ES.Index) ?T {
             return switch (id.tag) {
-                inline else => |tag| self.dispatch_get(tag, id.index),
+                inline else => |tag| {
+                    const field = &@field(self.storage, @tagName(tag));
+                    if (@TypeOf(field) == *const void) return null;
+                    const value = field.items[id.index];
+                    return if (is_debug) value.? else value;
+                },
             };
-        }
-
-        fn dispatch_get(self: *const Self, comptime tag: std.meta.Tag(meta.target), index: usize) ?T {
-            const field = std.meta.fieldInfo(meta.target, tag);
-            inline for (meta.field_names, meta.unions) |nm, un| {
-                inline for (un.fields) |f| {
-                    if (f.type == field.type) {
-                        return @field(self.storage, nm).items[index];
-                    }
-                }
-            }
-            return null;
-        }
-
-        fn dispatch(self: *Self, comptime tag: std.meta.Tag(meta.target), index: usize) ?*BaseType {
-            const field = std.meta.fieldInfo(meta.target, tag);
-            inline for (meta.field_names, meta.unions) |nm, un| {
-                inline for (un.fields) |f| {
-                    if (f.type == field.type) {
-                        return &@field(self.storage, nm).items[index];
-                    }
-                }
-            }
-            return null;
         }
     };
 }
 
 test "sanity" {
-    std.testing.refAllDeclsRecursive(EnumMetadata);
-
     const Enum = union(enum) {
         A: u8,
         B: u16,
@@ -392,20 +390,16 @@ test "sanity" {
     var ctnr = Ctnr.init();
     defer ctnr.deinit(std.testing.allocator);
 
-    const id = try ctnr.push(
-        std.testing.allocator,
-        Enum.D,
-    );
+    const cp = ctnr.checkpoint();
 
-    const val = ctnr.get(id);
+    const id = try ctnr.push(std.testing.allocator, cp, Enum.D);
+
+    const val = ctnr.get(cp, id);
     try std.testing.expectEqual(val, Enum.D);
 
-    const id2 = try ctnr.push(
-        std.testing.allocator,
-        .{ .G = 1 },
-    );
+    const id2 = try ctnr.push(std.testing.allocator, cp, .{ .G = 1 });
 
-    const val2 = ctnr.get_ptr(id2);
+    const val2 = ctnr.get(cp, id2);
     var a: u64 = 1;
     try std.testing.expectEqual(val2.G.*, a);
 
@@ -415,4 +409,17 @@ test "sanity" {
     defer shadow.deinit(std.testing.allocator);
 
     shadow.at(id2).?.* = 1;
+    _ = ctnr.nextId(.G);
+
+    var ctnr2 = Ctnr.init();
+    defer ctnr2.deinit(std.testing.allocator);
+
+    const slice = try ctnr.drainInto(&ctnr2, cp, std.testing.allocator);
+    try std.testing.expectEqual(ctnr2.query(.G).len, 1);
+    try std.testing.expectEqual(ctnr.query(.G).len, 0);
+
+    const view = ctnr2.view(slice);
+
+    try std.testing.expectEqual(view.get(id2).G, a);
+    try std.testing.expectEqual(view.query(.G).len, 1);
 }

@@ -39,8 +39,10 @@ pub const Token = enum {
     KeyIsize,
     KeyBool,
     KeyVoid,
+    KeyType,
     KeyTrue,
     KeyFalse,
+    KeyStruct,
 
     Int,
     Uint,

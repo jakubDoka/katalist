@@ -18,6 +18,8 @@ pub const TypeKind = enum {
 pub const Type = union(TypeKind) {
     pub const Store = EnumList.Unmanaged(Type);
     pub const Id = EnumList.Id(TypeKind);
+    pub const Builtin = Parser.Builtin;
+    pub const Int = Parser.Int;
 
     pub const type_lit = Type.encode(.Type).?;
     pub const void_lit = Type.encode(.Void).?;
@@ -26,84 +28,6 @@ pub const Type = union(TypeKind) {
     pub const ctint_lit = Type.encode(.{ .Int = Int.Ctint }).?;
     pub const usize_lit = Type.encode(.{ .Int = Int.Usize }).?;
     pub const decl_lit = Type.encode(.Decl).?;
-    pub const maxIntWidth: u15 = ~@as(u15, 0) - std.meta.fields(Builtin).len + 1;
-
-    pub const Int = packed struct(u16) {
-        pub const Usize = Int{ .bit_width = 64 };
-        pub const Isize = Int{ .signed = true, .bit_width = 64 };
-        pub const Ctint = Int{ .signed = true, .bit_width = maxIntWidth };
-
-        signed: bool = false,
-        bit_width: u15,
-
-        pub fn parse(str: []const u8) ?Int {
-            if (str.len < 2) return null;
-
-            const sign = switch (str[0]) {
-                'u' => true,
-                'i' => false,
-                else => return null,
-            };
-
-            const bit_width = std.fmt.parseInt(u15, str[1..], 10) catch return null;
-            if (bit_width == 0) return null;
-
-            return .{ .signed = sign, .bit_width = bit_width };
-        }
-
-        pub fn print(self: Int, writer: anytype) !void {
-            try std.fmt.format(writer, "{s}{d}", .{ if (self.signed) "i" else "u", self.bit_width });
-        }
-
-        pub fn isCt(self: Int) bool {
-            return self.bit_width == Ctint.bit_width;
-        }
-    };
-
-    pub const Builtin = union(enum) {
-        pub const Compact = u16;
-
-        Void,
-        Type,
-        Decl,
-        Bool,
-        Int: Int,
-
-        pub fn print(self: Builtin, writer: anytype) !void {
-            switch (self) {
-                .Int => |i| try i.print(writer),
-                inline else => |_, tag| {
-                    const name = @tagName(tag);
-                    comptime var low_name: [name.len]u8 = undefined;
-                    inline for (&low_name, name) |*d, s| d.* = comptime std.ascii.toLower(s);
-                    try writer.writeAll(&low_name);
-                },
-            }
-        }
-
-        pub fn asType(self: Builtin) Type.Id {
-            return Type.encode(switch (self) {
-                .Int => |i| .{ .Int = i },
-                inline else => |_, t| @unionInit(Type, @tagName(t), {}),
-            }).?;
-        }
-
-        pub fn compact(self: Builtin) Compact {
-            return switch (self) {
-                .Int => |i| @bitCast(i),
-                inline else => |_, tag| maxIntWidth + @as(Compact, @intFromEnum(tag)),
-            };
-        }
-
-        pub fn expand(self: Compact) Builtin {
-            if (self < maxIntWidth) return .{ .Int = @bitCast(self) };
-            const Tag = std.meta.Tag(Builtin);
-            return switch (@as(Tag, @enumFromInt(@as(Compact, self - maxIntWidth)))) {
-                .Int => .{ .Int = @bitCast(self) },
-                inline else => |tag| @unionInit(Builtin, @tagName(tag), {}),
-            };
-        }
-    };
 
     pub const Func = struct {
         params: []Ast.Expr.Id,
@@ -116,6 +40,13 @@ pub const Type = union(TypeKind) {
     Bool,
     Never,
     Int: Int,
+
+    pub fn fromBuiltin(self: Builtin) Type.Id {
+        return Type.encode(switch (self) {
+            .Int => |i| .{ .Int = i },
+            inline else => |_, t| @unionInit(Type, @tagName(t), {}),
+        }).?;
+    }
 
     pub fn encode(self: Type) ?Id {
         return Id.encode(self);
@@ -208,7 +139,7 @@ pub const Module = struct {
 
         return .{
             .store = Type.Store.init(),
-            .ast = try AstStore.init(&ast.expr_store, alloc),
+            .ast = try AstStore.init(&ast.exprs, alloc),
         };
     }
 
@@ -315,7 +246,7 @@ pub fn check(alloc: std.mem.Allocator, ast: *const Parser.Ast, source: []const u
 
 fn checkFile(self: *Self) Error!void {
     for (self.ast.items.items) |item| {
-        const ident = switch (self.ast.item_store.get(item)) {
+        const ident = switch (self.ast.items.get(item)) {
             .Func => |f| f.name,
         };
 
@@ -329,7 +260,7 @@ fn checkFile(self: *Self) Error!void {
     defer self.alloc.free(self.func_set);
 
     while (self.to_check.popOrNull()) |id| {
-        switch (self.ast.item_store.get(id)) {
+        switch (self.ast.items.get(id)) {
             .Func => |f| try self.checkFunc(f, id.index),
         }
     }
@@ -386,7 +317,7 @@ fn checkExpr(self: *Self, expected: ?Type.Id, expr: Parser.Ast.Expr.Id) InnerErr
         slot.* = Value.never_lit;
     };
 
-    var val = switch (self.ast.expr_store.get(expr)) {
+    var val = switch (self.ast.exprs.get(expr)) {
         .BuiltinType => |b| Value.ty(Type.Builtin.expand(b).asType()),
         .Int => |i| Value{ .type = expected orelse Type.ctint_lit, .data = .{ .int = i } },
         .Bool => |b| Value{ .type = Type.bool_lit, .data = .{ .bool = b } },
@@ -430,7 +361,7 @@ fn checkCall(self: *Self, c: Parser.Ast.Expr.Call) InnerError!Value {
     const decl = (try self.checkExpr(Type.decl_lit, c.callee)).data.decl;
 
     if (decl.tag != .Func) @panic("todo");
-    const func = self.ast.item_store.get(decl).Func;
+    const func = self.ast.items.get(decl).Func;
 
     const frame = self.scope.pushFrame();
     const ret = (try self.checkSignature(func, decl.index)).data.type;

@@ -588,7 +588,7 @@ pub fn generate(alloc: std.mem.Allocator, ast: *const Ast, types: *const Types, 
     var scope = Scope.init(alloc, sym_buffer);
     defer scope.deinit();
 
-    const max_funcs = ast.item_store.approxCountFor(Ast.Item.Func);
+    const max_funcs = ast.items.slice(.Func).len;
     var fb = FuncBuilder.init(alloc, @intCast(max_funcs));
     defer fb.deinit();
 
@@ -605,7 +605,7 @@ pub fn generate(alloc: std.mem.Allocator, ast: *const Ast, types: *const Types, 
 
 fn gen(self: *Self, writer: anytype) !void {
     for (self.types.reached_functions) |item| {
-        switch (self.ast.item_store.get(item)) {
+        switch (self.ast.items.get(item)) {
             .Func => |f| {
                 try self.genFunc(f);
 
@@ -686,7 +686,7 @@ fn genExpr(self: *Self, expr: Ast.Expr.Id) InnerError!?Scope.Ref {
         });
     }
 
-    return switch (self.ast.expr_store.get(expr)) {
+    return switch (self.ast.exprs.get(expr)) {
         .Var => |v| try self.genVar(v),
         .Ret => |r| try self.genRet(r),
         .If => |i| try self.genIf(value, i),
