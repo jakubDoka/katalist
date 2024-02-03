@@ -30,31 +30,26 @@ L1:
     push r15
     push rbp
     mov rbp, rsp
-    mov r15, rdi
+    cmp dil, 0x0
+    sete r15b
+    movzx r15, r15b
     cmp r15b, 0x0
-    sete r14b
-    movzx r14, r14b
-    cmp r14b, 0x0
     je L3
     mov rax, rsi
     jmp L4
     L3:
-    mov r15, rdi
-    dec r15
-    push rdi
-    mov rdi, r15
+    mov r14, 0x0
+    dec r14
+    mov rdi, r14
     push rsi
     mov rsi, rdx
-    mov r13, [rbp - 0x8]
+    mov r13, [rbp - 0x0]
     add r13, rdx
-    push rdx
     mov rdx, r13
     call L1
-    pop rdx
     pop rsi
-    pop rdi
-    mov r15, rax
-    mov rax, r15
+    mov r14, rax
+    mov rax, r14
     jmp L4
 L4:
     mov rsp, rbp
@@ -63,4 +58,4 @@ L4:
     pop r14
     pop r13
     ret
-exit code: child_process.ChildProcess.Term{ .Exited = 55 }
+exit code: child_process.ChildProcess.Term{ .Signal = 11 }

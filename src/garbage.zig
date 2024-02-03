@@ -97,48 +97,26 @@ fn runPrinttest(comptime name: []const u8, comptime tst: anytype, ctx: anytype) 
 
     try std.fs.cwd().makePath(out_folder);
     const out_path = out_folder ++ "/" ++ name;
-    const out_file = std.fs.cwd().openFile(out_path, .{ .mode = .read_write }) catch
-        try std.fs.cwd().createFile(out_path, .{});
+    const out_file = try std.fs.cwd().createFile(out_path, .{});
     defer out_file.close();
 
-    const end = try out_file.getEndPos();
-    const bytes = try std.heap.page_allocator.alloc(u8, end);
-    defer std.heap.page_allocator.free(bytes);
-    const red = try out_file.readAll(bytes);
-    std.debug.assert(red == bytes.len);
-
-    var buffer = std.ArrayList(u8).init(std.heap.page_allocator);
-    defer buffer.deinit();
-    var writer = buffer.writer();
+    var writer = out_file.writer();
     var alloc = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = alloc.deinit();
 
     const err = tst(writer, name, alloc.allocator(), ctx);
 
-    if (std.mem.eql(u8, bytes, buffer.items)) return;
-
-    if (bytes.len == 0) {
-        try out_file.writeAll(buffer.items);
-        std.log.warn("new test detected: {s}", .{name});
-        std.log.warn("test output:\n{s}", .{buffer.items});
-        return;
-    }
-
-    if (std.os.getenv("UPDATE_TESTS") != null) {
-        try out_file.seekTo(0);
-        try out_file.setEndPos(0);
-        try out_file.writeAll(buffer.items);
-        return;
-    }
-
-    const draft_path = out_path ++ ".draft";
-    const draft_file = try std.fs.cwd().createFile(draft_path, .{});
-    defer draft_file.close();
-
-    try draft_file.writeAll(buffer.items);
-
     var child = std.process.Child.init(
-        &.{ "/usr/bin/diff", "--color", "-y", "--left-column", out_path, draft_path },
+        &.{ "/usr/bin/git", "diff", out_path, "--quiet" },
+        std.heap.page_allocator,
+    );
+    const status = try child.spawnAndWait();
+    if (status == .Exited and status.Exited == 0) {
+        return;
+    }
+
+    child = std.process.Child.init(
+        &.{ "/usr/bin/git", "diff", out_path },
         std.heap.page_allocator,
     );
     _ = try child.spawnAndWait();
