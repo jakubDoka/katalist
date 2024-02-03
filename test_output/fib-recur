@@ -28,31 +28,26 @@ L1:
     push r15
     push rbp
     mov rbp, rsp
-    mov r15, rdi
-    cmp r15b, 0x2
-    setl r14b
-    movzx r14, r14b
-    cmp r14b, 0x0
+    cmp rdi, 0x2
+    setl r15b
+    movzx r15, r15b
+    cmp r15b, 0x0
     je L3
     mov rax, rdi
     jmp L4
     L3:
-    mov r15, rdi
-    dec r15
+    mov r14, rdi
+    dec r14
     push rdi
-    mov rdi, r15
+    mov rdi, r14
     call L1
     pop rdi
-    mov r15, rax
-    mov r13, rdi
-    sub r13, 0x2
-    push rdi
-    mov rdi, r13
+    mov r14, rax
+    sub rdi, 0x2
     call L1
-    pop rdi
     mov r13, rax
-    add r15, r13
-    mov rax, r15
+    add r14, r13
+    mov rax, r14
     jmp L4
 L4:
     mov rsp, rbp

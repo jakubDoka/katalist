@@ -95,7 +95,7 @@ main:
     mov rdx, rcx
     mov rbx, 0x6
     push rbx
-    mov rbx, [rbp - 0x0]
+    mov rbx, [rbp - 0x8]
     add rbx, 0x5
     push rdi
     mov rdi, 0x4
@@ -105,7 +105,7 @@ main:
     mov rcx, rax
     add rbx, rcx
     pop rcx
-    mov [rbp - 0x0], rbx
+    mov [rbp - 0x8], rbx
     push rdx
     mov rdx, 0x6
     push rsi
@@ -176,8 +176,8 @@ main:
     add rdx, rsi
     pop rsi
     mov rcx, rdx
+    mov rax, [rbp - 0x48]
     sub rsp, 0x58
-    mov rax, [rbp - 0x40]
     jmp L2
     pop rdx
     pop rcx

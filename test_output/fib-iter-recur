@@ -25,7 +25,6 @@ L2:
     pop r15
     ret
 L1:
-    push r13
     push r14
     push r15
     push rbp
@@ -38,15 +37,15 @@ L1:
     mov rax, rsi
     jmp L4
     L3:
-    mov r14, rdi
-    dec r14
-    mov rdi, r14
+    dec rdi
     push rsi
     mov rsi, rdx
-    mov r13, [rbp - 0x0]
-    add r13, rdx
-    mov rdx, r13
+    mov r14, [rbp - 0x8]
+    add r14, rdx
+    push rdx
+    mov rdx, r14
     call L1
+    pop rdx
     pop rsi
     mov r14, rax
     mov rax, r14
@@ -56,6 +55,5 @@ L4:
     pop rbp
     pop r15
     pop r14
-    pop r13
     ret
-exit code: child_process.ChildProcess.Term{ .Exited = 153 }
+exit code: child_process.ChildProcess.Term{ .Exited = 55 }

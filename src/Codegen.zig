@@ -287,7 +287,8 @@ pub const Value = union(enum) {
 
         pub fn write(self: @This(), ctx: anytype) !void {
             const offset = if (self.pushed) self.offset + ctx.stack_size else self.offset;
-            try ctx.writer.print("[rbp - 0x{x}]", .{offset});
+            std.debug.assert(offset != ~@as(u31, 0));
+            try ctx.writer.print("[rbp - 0x{x}]", .{offset + 8});
         }
     };
 
@@ -304,6 +305,7 @@ pub const Value = union(enum) {
     Stack: Stack,
     Spilled: Spilled,
     Imm: u64,
+    Moved,
 
     pub fn write(self: Value, ctx: anytype) !void {
         switch (self) {
@@ -311,6 +313,7 @@ pub const Value = union(enum) {
             .Stack => |s| try s.write(ctx),
             .Spilled => |s| try s.write(ctx),
             .Imm => |i| try ctx.writer.print("0x{x}", .{i}),
+            .Moved => unreachable,
         }
     }
 
@@ -336,7 +339,7 @@ pub const Value = union(enum) {
             } else {
                 self.* = .{ .Spilled = .{ .reg = reg, .spill = .{ .index = @intCast(s.ref) } } };
             },
-            else => unreachable,
+            else => |v| std.debug.panic("TODO: {any}", .{v}),
         }
     }
 };
@@ -406,7 +409,12 @@ const RegAlloc = struct {
             bit = one << @intCast(self.spill_ring);
         }
         defer self.locations[self.spill_ring] = to;
-        return .{ .reg = @enumFromInt(self.spill_ring), .spill = self.locations[self.spill_ring].? };
+        const spl = self.locations[self.spill_ring].?;
+        std.debug.assert(spl.index != to.index);
+        return .{
+            .reg = @enumFromInt(self.spill_ring),
+            .spill = spl,
+        };
     }
 
     pub fn restore(self: *RegAlloc, reg: Reg, from: Scope.Ref) void {
@@ -434,7 +442,10 @@ pub const FuncBuilder = struct {
     label_count: Label,
 
     pub fn init(alloc: std.mem.Allocator, first_label: Label) FuncBuilder {
-        return .{ .instrs = std.ArrayList(TypedInstr).init(alloc), .label_count = first_label };
+        return .{
+            .instrs = std.ArrayList(TypedInstr).init(alloc),
+            .label_count = first_label,
+        };
     }
 
     pub fn deinit(self: *FuncBuilder) void {
@@ -487,6 +498,7 @@ const Scope = struct {
     pub const Frame = struct {
         symbol_len: usize,
         spill_len: usize,
+        borrow_len: usize,
     };
 
     pub const Symbol = struct {
@@ -497,6 +509,7 @@ const Scope = struct {
         value: Value,
         type: Type.Id,
         temorary: bool,
+        borrowed: bool = false,
     };
 
     pub const Ref = struct {
@@ -504,6 +517,7 @@ const Scope = struct {
     };
 
     symbols: []Symbol,
+    borrowed: std.ArrayList(Ref),
     ret: Type.Id = Type.void_lit,
     slots: std.ArrayList(Slot),
 
@@ -511,11 +525,13 @@ const Scope = struct {
         return Scope{
             .symbols = buffer[0..0],
             .slots = std.ArrayList(Slot).init(alloc),
+            .borrowed = std.ArrayList(Ref).init(alloc),
         };
     }
 
     pub fn deinit(self: *Scope) void {
         self.slots.deinit();
+        self.borrowed.deinit();
     }
 
     pub fn clear(self: *Scope, ret: Type.Id) void {
@@ -527,6 +543,7 @@ const Scope = struct {
         return .{
             .symbol_len = self.symbols.len,
             .spill_len = self.slots.items.len,
+            .borrow_len = self.borrowed.items.len,
         };
     }
 
@@ -558,11 +575,19 @@ const Scope = struct {
         return &self.slots.items[ref.index];
     }
 
-    pub fn popFrame(self: *Scope, frame: Frame, comptime shift_last_slot: bool) if (shift_last_slot) Ref else void {
+    pub fn popFrame(
+        self: *Scope,
+        frame: Frame,
+        comptime shift_last_slot: bool,
+    ) if (shift_last_slot) Ref else void {
         if (shift_last_slot) {
             std.mem.swap(Slot, &self.slots.items[frame.spill_len], &self.slots.items[self.slots.items.len - 1]);
         }
 
+        for (self.borrowed.items[frame.borrow_len..]) |ref| {
+            self.slots.items[ref.index].borrowed = false;
+        }
+        self.borrowed.items.len = frame.borrow_len;
         self.symbols.len = frame.symbol_len;
         self.slots.items.len = frame.spill_len + @intFromBool(shift_last_slot);
 
@@ -812,7 +837,10 @@ fn genCall(self: *Self, c: Ast.Expr.Call) InnerError!?Scope.Ref {
 
     const ref = try self.allocRegPush(self.scope.ret, true);
     const ref_loc = self.scope.getSlot(ref);
-    try self.fb.pushInstr(ref_loc.type, .{ .Mov = .{ .dst = ref_loc.value, .src = .{ .Reg = .rax } } });
+    try self.fb.pushInstr(ref_loc.type, .{ .Mov = .{
+        .dst = ref_loc.value,
+        .src = .{ .Reg = .rax },
+    } });
 
     return ref;
 }
@@ -820,12 +848,17 @@ fn genCall(self: *Self, c: Ast.Expr.Call) InnerError!?Scope.Ref {
 fn allocRegPush(self: *Self, ty: Type.Id, temporary: bool) !Scope.Ref {
     const ref = self.scope.nextSlot();
     if (self.regs.alloc(ref)) |reg| {
-        return try self.scope.addSlot(.{ .value = .{ .Reg = reg }, .type = ty, .temorary = temporary });
+        return try self.scope.addSlot(.{
+            .value = .{ .Reg = reg },
+            .type = ty,
+            .temorary = temporary,
+        });
     }
 
     const target = self.regs.spill(ref);
     try self.fb.pushInstr(ty, .{ .Push = .{ .Reg = target.reg } });
-    std.debug.assert(self.scope.getSlot(target.spill).value.spill(self.fb.pushStack(8)) == target.reg);
+    std.debug.assert(self.scope.getSlot(target.spill)
+        .value.spill(self.fb.pushStack(8)) == target.reg);
     return try self.scope.addSlot(.{
         .value = .{ .Spilled = target },
         .type = ty,
@@ -836,25 +869,28 @@ fn allocRegPush(self: *Self, ty: Type.Id, temporary: bool) !Scope.Ref {
 fn allocRegPushSpecific(self: *Self, ty: Type.Id, reg: Reg) !Scope.Ref {
     const ref = self.scope.nextSlot();
     if (self.regs.allocSpecific(ref, reg)) |current| {
+        std.debug.assert(current.index != ref.index);
         const current_loc = self.scope.getSlot(current);
         std.debug.assert(switch (current_loc.value) {
             .Imm => false,
             .Reg => |r| reg == r,
             .Stack => false,
             .Spilled => |p| reg == p.reg,
+            .Moved => false,
         });
         try self.fb.pushInstr(current_loc.type, .{ .Push = current_loc.value });
         _ = try self.scope.addSlot(.{
             .value = .{ .Spilled = .{ .reg = reg, .spill = current } },
             .type = ty,
-            .temorary = true,
+            .temorary = false,
         });
-        std.debug.assert(self.scope.getSlot(current).value.spill(self.fb.pushStack(8)) == reg);
+        std.debug.assert(self.scope.getSlot(current)
+            .value.spill(self.fb.pushStack(8)) == reg);
     } else {
         _ = try self.scope.addSlot(.{
             .value = .{ .Reg = reg },
             .type = ty,
-            .temorary = true,
+            .temorary = false,
         });
     }
     return ref;
@@ -864,6 +900,7 @@ fn prepareCall(self: *Self, args: []const Ast.Expr.Id) InnerError!void {
     for (args, Reg.args[0..args.len]) |arg, reg| {
         const value = (try self.genExpr(arg)).?;
         const loc = self.scope.getSlot(value);
+        if (loc.value == .Reg and loc.value.Reg == reg) continue;
         const regv = try self.allocRegPushSpecific(loc.type, reg);
         try self.pushMov(value, regv);
     }
@@ -881,16 +918,15 @@ fn genMathOp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
     const frame = self.scope.pushFrame();
 
     var lhs = (try self.genExpr(b.lhs)).?;
+    const rhs_frame = self.scope.pushFrame();
     var rhs = (try self.genExpr(b.rhs)).?;
 
-    std.debug.print("genMathOp {any} {any}\n", .{ lhs, rhs });
-
-    if (!self.scope.getSlot(lhs).temorary) blk: {
+    if (!self.scope.getSlot(lhs).temorary) {
         if (self.scope.getSlot(rhs).temorary and b.op.isCommutative()) {
             std.mem.swap(Scope.Ref, &lhs, &rhs);
-            break :blk;
+        } else {
+            lhs = try self.ensureTemporary(lhs);
         }
-        lhs = try self.ensureTemporary(lhs);
     }
 
     const ty = self.scope.getSlot(lhs).type;
@@ -903,9 +939,7 @@ fn genMathOp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
         else => unreachable,
     }
 
-    if (lhs.index < rhs.index) {
-        std.mem.swap(Scope.Slot, self.scope.getSlot(lhs), self.scope.getSlot(rhs));
-    }
+    if (lhs.index < rhs.index) try self.popFrame(rhs_frame, false);
 
     return try self.popFrame(frame, true);
 }
@@ -953,14 +987,17 @@ fn genIdent(self: *Self, ident: Ast.Ident) InnerError!?Scope.Ref {
     var ref = self.scope.findSymbol(ident).?.ref;
 
     const slot = self.scope.getSlot(ref);
-    if (ident.last and slot.value == .Reg) {
+    if (ident.last and slot.value == .Reg and !slot.borrowed) {
         ref = try self.scope.addSlot(.{
             .value = slot.value,
             .type = slot.type,
-            .temorary = false,
+            .temorary = true,
         });
-        std.debug.print("suba {any} {s} {any}\n", .{ ident, ident.slice(self.source), ref });
+        slot.value = .Moved;
     }
+
+    slot.borrowed = true;
+    try self.scope.borrowed.append(ref);
 
     return ref;
 }
@@ -982,30 +1019,38 @@ fn genVar(self: *Self, variable: Ast.Expr.Var) InnerError!?Scope.Ref {
 fn genRet(self: *Self, ret: Ast.Expr.Id) InnerError!?Scope.Ref {
     const value = (try self.genExpr(ret)).?;
     const loc = self.scope.getSlot(value);
-    try self.fb.pushInstr(Type.usize_lit, .{ .Sub = .{
-        .dst = .{ .Reg = .rsp },
-        .src = .{ .Imm = self.fb.pushed_stack_size },
-    } });
     try self.fb.pushInstr(loc.type, .{ .Mov = .{
         .dst = .{ .Reg = .rax },
         .src = loc.value,
+    } });
+    try self.fb.pushInstr(Type.usize_lit, .{ .Sub = .{
+        .dst = .{ .Reg = .rsp },
+        .src = .{ .Imm = self.fb.pushed_stack_size },
     } });
     try self.fb.pushInstrUntyped(.Ret);
     return InnerError.Returned;
 }
 
-fn popFrame(self: *Self, frame: Scope.Frame, comptime shift_last_slot: bool) !if (shift_last_slot) Scope.Ref else void {
-    for (0..self.scope.slots.items.len - @intFromBool(shift_last_slot) - frame.spill_len) |ri| {
+fn popFrame(
+    self: *Self,
+    frame: Scope.Frame,
+    comptime shift_last_slot: bool,
+) !if (shift_last_slot) Scope.Ref else void {
+    for (0..self.scope.slots.items.len -
+        @intFromBool(shift_last_slot) - frame.spill_len) |ri|
+    {
         const i = self.scope.slots.items.len - ri - 1 - @intFromBool(shift_last_slot);
         const slot = self.scope.slots.items[i];
         switch (slot.value) {
             .Imm => {},
             .Reg => |r| self.regs.free(r),
             .Stack => |s| if (!s.pushed) {
-                _ = self.fb.freeStack(8);
+                //_ = self.fb.freeStack(9);
             },
+            .Moved => {},
             .Spilled => |p| {
                 const spill = self.scope.getSlot(p.spill);
+                std.debug.assert(p.spill.index != i);
                 _ = self.fb.popStack(8);
                 try self.fb.pushInstr(spill.type, .{ .Pop = .{ .Reg = p.reg } });
                 self.regs.restore(p.reg, p.spill);
@@ -1023,6 +1068,7 @@ fn popFrame(self: *Self, frame: Scope.Frame, comptime shift_last_slot: bool) !if
             .Reg => |r| self.regs.restore(r, new_loc),
             .Stack => {},
             .Spilled => |*p| self.regs.restore(p.reg, new_loc),
+            .Moved => {},
         }
     }
 
@@ -1211,7 +1257,7 @@ test "print" {
     };
 
     inline for (tasks) |task| {
-        if (comptime !std.mem.eql(u8, task[0], "fib-iter-recur")) continue;
+        //if (comptime !std.mem.eql(u8, task[0], "spilling")) continue;
         garbage.printtest(task[0], performTest, task[1]) catch |err| switch (err) {
             error.DiffFailed => {},
             else => |e| return e,
