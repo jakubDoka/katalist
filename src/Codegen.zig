@@ -479,6 +479,7 @@ pub const FuncBuilder = struct {
     }
 
     pub fn pushInstr(self: *FuncBuilder, ty: Type.Id, instr: Instr) !void {
+        if (Type.decode(ty)) |t| std.debug.assert(!t.isComptime());
         var final_instr = instr;
         if (final_instr.isUseless()) return;
         try self.instrs.append(.{ .instr = final_instr, .type = ty });
@@ -917,29 +918,31 @@ fn genBinary(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
 fn genMathOp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
     const frame = self.scope.pushFrame();
 
-    var lhs = (try self.genExpr(b.lhs)).?;
+    const lhs = (try self.genExpr(b.lhs)).?;
     const rhs_frame = self.scope.pushFrame();
-    var rhs = (try self.genExpr(b.rhs)).?;
+    const rhs = (try self.genExpr(b.rhs)).?;
 
-    if (!self.scope.getSlot(lhs).temorary) {
-        if (self.scope.getSlot(rhs).temorary and b.op.isCommutative()) {
-            std.mem.swap(Scope.Ref, &lhs, &rhs);
+    var lhs_slot = self.scope.getSlot(lhs);
+    var rhs_slot = self.scope.getSlot(rhs);
+    var swapped = false;
+
+    if (!lhs_slot.temorary) {
+        if (rhs_slot.temorary and b.op.isCommutative()) {
+            std.mem.swap(*Scope.Slot, &lhs_slot, &rhs_slot);
         } else {
-            lhs = try self.ensureTemporary(lhs);
+            lhs_slot = self.scope.getSlot(try self.ensureTemporary(lhs));
         }
+        swapped = true;
     }
 
-    const ty = self.scope.getSlot(lhs).type;
-    const lhs_loc = self.scope.getSlot(lhs).value;
-    const rhs_loc = self.scope.getSlot(rhs).value;
-
-    switch (b.op) {
-        .Add => try self.fb.pushInstr(ty, .{ .Add = .{ .dst = lhs_loc, .src = rhs_loc } }),
-        .Sub => try self.fb.pushInstr(ty, .{ .Sub = .{ .dst = lhs_loc, .src = rhs_loc } }),
+    const binary = Instr.Binary{ .dst = lhs_slot.value, .src = rhs_slot.value };
+    try self.fb.pushInstr(lhs_slot.type, switch (b.op) {
+        .Add => .{ .Add = binary },
+        .Sub => .{ .Sub = binary },
         else => unreachable,
-    }
+    });
 
-    if (lhs.index < rhs.index) try self.popFrame(rhs_frame, false);
+    if (!swapped) try self.popFrame(rhs_frame, false);
 
     return try self.popFrame(frame, true);
 }
@@ -1257,6 +1260,7 @@ test "print" {
     };
 
     inline for (tasks) |task| {
+        std.debug.print("running test: {s}\n", .{task[0]});
         //if (comptime !std.mem.eql(u8, task[0], "spilling")) continue;
         garbage.printtest(task[0], performTest, task[1]) catch |err| switch (err) {
             error.DiffFailed => {},

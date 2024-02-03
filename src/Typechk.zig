@@ -76,6 +76,14 @@ pub const Type = union(TypeKind) {
 
         return null;
     }
+
+    pub fn isComptime(self: Type) bool {
+        return switch (self) {
+            .Int => |i| i.isCt(),
+            .Never, .Void, .Type, .Decl => true,
+            else => false,
+        };
+    }
 };
 
 pub const Value = struct {
@@ -331,7 +339,7 @@ fn checkExpr(self: *Self, expected: ?Type.Id, expr: Ast.Expr.Id) InnerError!Valu
         .Int => |i| Value{ .type = expected orelse Type.ctint_lit, .data = .{ .int = i } },
         .Bool => |b| Value{ .type = Type.bool_lit, .data = .{ .bool = b } },
         .Ret => |r| try self.checkRet(r),
-        .Binary => |o| try self.checkBinary(o),
+        .Binary => |o| try self.checkBinary(expected, o),
         .Ident => |i| try self.checkIdent(i),
         .Var => |v| try self.checkVar(v),
         .Call => |c| try self.checkCall(c),
@@ -433,14 +441,39 @@ fn checkRet(self: *Self, r: Ast.Expr.Id) InnerError!Value {
     return InnerError.Returned;
 }
 
-fn checkBinary(self: *Self, b: Ast.Expr.Binary) InnerError!Value {
+fn checkBinary(self: *Self, expected: ?Type.Id, b: Ast.Expr.Binary) InnerError!Value {
     return switch (b.op) {
-        .Add, .Sub, .Eq, .Ne, .Gt, .Lt, .Ge, .Le => try self.checkMathOp(b),
+        .Add, .Sub => try self.checkMathOp(expected, b),
+        .Eq, .Ne, .Gt, .Lt, .Ge, .Le => try self.checkCmpOp(b),
         .Assign => try self.checkAssign(b),
     };
 }
 
-fn checkMathOp(self: *Self, op: Ast.Expr.Binary) InnerError!Value {
+fn checkMathOp(self: *Self, expected: ?Type.Id, op: Ast.Expr.Binary) InnerError!Value {
+    const lhs = try self.checkExpr(expected, op.lhs);
+    const rhs = try self.checkExpr(lhs.type, op.rhs);
+    const ty = switch (op.op) {
+        .Add, .Sub => lhs.type,
+        .Eq, .Ne, .Gt, .Lt, .Ge, .Le => Type.bool_lit,
+        else => unreachable,
+    };
+
+    if (lhs.is_runtime or rhs.is_runtime) {
+        if (!lhs.type.eql(rhs.type))
+            (self.types.at(op.lhs) orelse @panic("todo")).* = Value.rt(ty);
+        return Value.rt(ty);
+    }
+
+    const lhs_val = lhs.ensureLoaded().data;
+    const rhs_val = rhs.ensureLoaded().data;
+    return Value{ .type = ty, .data = .{ .int = switch (op.op) {
+        .Add => lhs_val.int + rhs_val.int,
+        .Sub => lhs_val.int - rhs_val.int,
+        else => unreachable,
+    } } };
+}
+
+fn checkCmpOp(self: *Self, op: Ast.Expr.Binary) InnerError!Value {
     const lhs = try self.checkExpr(null, op.lhs);
     const rhs = try self.checkExpr(lhs.type, op.rhs);
     const ty = switch (op.op) {
@@ -457,17 +490,15 @@ fn checkMathOp(self: *Self, op: Ast.Expr.Binary) InnerError!Value {
 
     const lhs_val = lhs.ensureLoaded().data;
     const rhs_val = rhs.ensureLoaded().data;
-    return switch (op.op) {
-        .Add => Value{ .type = ty, .data = .{ .int = lhs_val.int + rhs_val.int } },
-        .Sub => Value{ .type = ty, .data = .{ .int = lhs_val.int - rhs_val.int } },
-        .Eq => Value{ .type = ty, .data = .{ .bool = lhs_val.int == rhs_val.int } },
-        .Ne => Value{ .type = ty, .data = .{ .bool = lhs_val.int != rhs_val.int } },
-        .Gt => Value{ .type = ty, .data = .{ .bool = lhs_val.int > rhs_val.int } },
-        .Lt => Value{ .type = ty, .data = .{ .bool = lhs_val.int < rhs_val.int } },
-        .Ge => Value{ .type = ty, .data = .{ .bool = lhs_val.int >= rhs_val.int } },
-        .Le => Value{ .type = ty, .data = .{ .bool = lhs_val.int <= rhs_val.int } },
+    return Value{ .type = ty, .data = .{ .bool = switch (op.op) {
+        .Eq => lhs_val.int == rhs_val.int,
+        .Ne => lhs_val.int != rhs_val.int,
+        .Gt => lhs_val.int > rhs_val.int,
+        .Lt => lhs_val.int < rhs_val.int,
+        .Ge => lhs_val.int >= rhs_val.int,
+        .Le => lhs_val.int <= rhs_val.int,
         else => unreachable,
-    };
+    } } };
 }
 
 fn checkAssign(self: *Self, a: Ast.Expr.Binary) InnerError!Value {
