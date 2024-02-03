@@ -30,7 +30,7 @@ L1:
     push r15
     push rbp
     mov rbp, rsp
-    cmp dil, 0x0
+    cmp rdi, 0x0
     sete r15b
     movzx r15, r15b
     cmp r15b, 0x0
@@ -38,7 +38,7 @@ L1:
     mov rax, rsi
     jmp L4
     L3:
-    mov r14, 0x0
+    mov r14, rdi
     dec r14
     mov rdi, r14
     push rsi
@@ -58,4 +58,4 @@ L4:
     pop r14
     pop r13
     ret
-exit code: child_process.ChildProcess.Term{ .Signal = 11 }
+exit code: child_process.ChildProcess.Term{ .Exited = 153 }

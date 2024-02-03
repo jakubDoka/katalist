@@ -107,7 +107,7 @@ fn runPrinttest(comptime name: []const u8, comptime tst: anytype, ctx: anytype) 
     const err = tst(writer, name, alloc.allocator(), ctx);
 
     var child = std.process.Child.init(
-        &.{ "/usr/bin/git", "diff", out_path, "--quiet" },
+        &.{ "/usr/bin/git", "diff", "--quiet", out_path },
         std.heap.page_allocator,
     );
     const status = try child.spawnAndWait();
@@ -116,7 +116,7 @@ fn runPrinttest(comptime name: []const u8, comptime tst: anytype, ctx: anytype) 
     }
 
     child = std.process.Child.init(
-        &.{ "/usr/bin/git", "diff", out_path },
+        &.{ "/usr/bin/git", "--no-pager", "diff", out_path },
         std.heap.page_allocator,
     );
     _ = try child.spawnAndWait();

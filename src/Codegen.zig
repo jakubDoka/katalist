@@ -871,7 +871,8 @@ fn prepareCall(self: *Self, args: []const Ast.Expr.Id) InnerError!void {
 
 fn genBinary(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
     return switch (b.op) {
-        .Add, .Sub, .Eq, .Ne, .Lt, .Gt, .Le, .Ge => try self.genMathOp(b),
+        .Add, .Sub => try self.genMathOp(b),
+        .Eq, .Ne, .Lt, .Gt, .Le, .Ge => try self.genCmp(b),
         .Assign => try self.genAssign(b),
     };
 }
@@ -882,7 +883,9 @@ fn genMathOp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
     var lhs = (try self.genExpr(b.lhs)).?;
     var rhs = (try self.genExpr(b.rhs)).?;
 
-    if (b.op.mutatesOperand() and !self.scope.getSlot(lhs).temorary) blk: {
+    std.debug.print("genMathOp {any} {any}\n", .{ lhs, rhs });
+
+    if (!self.scope.getSlot(lhs).temorary) blk: {
         if (self.scope.getSlot(rhs).temorary and b.op.isCommutative()) {
             std.mem.swap(Scope.Ref, &lhs, &rhs);
             break :blk;
@@ -897,25 +900,42 @@ fn genMathOp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
     switch (b.op) {
         .Add => try self.fb.pushInstr(ty, .{ .Add = .{ .dst = lhs_loc, .src = rhs_loc } }),
         .Sub => try self.fb.pushInstr(ty, .{ .Sub = .{ .dst = lhs_loc, .src = rhs_loc } }),
-        else => {
-            try self.fb.pushInstr(Type.bool_lit, .{ .Cmp = .{ .dst = lhs_loc, .src = rhs_loc } });
-            const set: Instr.Set.Cc = switch (b.op) {
-                .Eq => .e,
-                .Ne => .ne,
-                .Lt => .l,
-                .Gt => .g,
-                .Le => .le,
-                .Ge => .ge,
-                else => unreachable,
-            };
-            const ref = try self.allocRegPush(Type.bool_lit, true);
-            try self.fb.pushInstrUntyped(.{ .Set = .{ .dst = self.scope.getSlot(ref).value.Reg, .cc = set } });
-        },
+        else => unreachable,
     }
 
     if (lhs.index < rhs.index) {
         std.mem.swap(Scope.Slot, self.scope.getSlot(lhs), self.scope.getSlot(rhs));
     }
+
+    return try self.popFrame(frame, true);
+}
+
+fn genCmp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
+    const frame = self.scope.pushFrame();
+
+    var lhs = (try self.genExpr(b.lhs)).?;
+    var rhs = (try self.genExpr(b.rhs)).?;
+
+    const ty = self.scope.getSlot(lhs).type;
+    try self.fb.pushInstr(ty, .{ .Cmp = .{
+        .dst = self.scope.getSlot(lhs).value,
+        .src = self.scope.getSlot(rhs).value,
+    } });
+
+    const set: Instr.Set.Cc = switch (b.op) {
+        .Eq => .e,
+        .Ne => .ne,
+        .Lt => .l,
+        .Gt => .g,
+        .Le => .le,
+        .Ge => .ge,
+        else => unreachable,
+    };
+    const ref = try self.allocRegPush(Type.bool_lit, true);
+    try self.fb.pushInstrUntyped(.{ .Set = .{
+        .dst = self.scope.getSlot(ref).value.Reg,
+        .cc = set,
+    } });
 
     return try self.popFrame(frame, true);
 }
@@ -939,7 +959,7 @@ fn genIdent(self: *Self, ident: Ast.Ident) InnerError!?Scope.Ref {
             .type = slot.type,
             .temorary = false,
         });
-        std.debug.print("{any}\n", .{ident});
+        std.debug.print("suba {any} {s} {any}\n", .{ ident, ident.slice(self.source), ref });
     }
 
     return ref;
