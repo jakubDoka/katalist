@@ -1,9 +1,9 @@
 const std = @import("std");
 const EnumList = @import("EnumList.zig");
 const Parser = @import("Parser.zig");
-const Ast = Parser.Ast;
+const Ast = @import("Parser/Ast.zig");
 const Typechk = @import("Typechk.zig");
-const Types = Typechk.Module;
+const Module = Typechk.Module;
 const Type = Typechk.Type;
 const garbage = @import("garbage.zig");
 //const RegAlloc = @import("Codegen/RegAlloc.zig");
@@ -77,7 +77,7 @@ fn Emmiter(comptime W: type) type {
             try declLabel(label, self.writer, self.config.entry);
         }
 
-        pub fn writeInstrs(self: *EThis, instrs: []FuncBuilder.TypedInstr, types: *const Types) !void {
+        pub fn writeInstrs(self: *EThis, instrs: []FuncBuilder.TypedInstr, types: *const Module) !void {
             for (instrs) |ty| {
                 if (ty.instr == .Ret) {
                     try self.printLine("jmp L{x}", .{self.epilogue});
@@ -87,7 +87,7 @@ fn Emmiter(comptime W: type) type {
             }
         }
 
-        fn writeInstr(self: *EThis, ty: FuncBuilder.TypedInstr, types: *const Types) !void {
+        fn writeInstr(self: *EThis, ty: FuncBuilder.TypedInstr, types: *const Module) !void {
             var ctx = .{
                 .stack_size = self.stack_size,
                 .entrypoint = self.config.entry,
@@ -576,25 +576,27 @@ const InnerError = error{Returned} || Error;
 const Self = @This();
 
 ast: *const Ast,
-types: *const Types,
+module: *const Module,
+types: *const Module.ReachedFunc = undefined,
+exprs: Ast.Expr.Store.View = undefined,
 source: []const u8,
 scope: *Scope,
 fb: *FuncBuilder,
 regs: RegAlloc = .{},
 
-pub fn generate(alloc: std.mem.Allocator, ast: *const Ast, types: *const Types, source: []const u8, writer: anytype) !void {
+pub fn generate(alloc: std.mem.Allocator, ast: *const Ast, types: *const Module, source: []const u8, writer: anytype) !void {
     const sym_buffer = try alloc.alloc(Scope.Symbol, ast.peak_sym_count);
     defer alloc.free(sym_buffer);
     var scope = Scope.init(alloc, sym_buffer);
     defer scope.deinit();
 
-    const max_funcs = ast.items.slice(.Func).len;
+    const max_funcs = ast.items.query(.Func).len;
     var fb = FuncBuilder.init(alloc, @intCast(max_funcs));
     defer fb.deinit();
 
     var self = Self{
         .ast = ast,
-        .types = types,
+        .module = types,
         .source = source,
         .scope = &scope,
         .fb = &fb,
@@ -604,34 +606,33 @@ pub fn generate(alloc: std.mem.Allocator, ast: *const Ast, types: *const Types, 
 }
 
 fn gen(self: *Self, writer: anytype) !void {
-    for (self.types.reached_functions) |item| {
-        switch (self.ast.items.get(item)) {
-            .Func => |f| {
-                try self.genFunc(f);
+    for (self.module.reached_functions) |*item| {
+        const func = &self.ast.items.query(.Func)[item.index];
+        self.types = item;
+        self.exprs = self.ast.exprs.view(func.slice);
+        try self.genFunc(func);
 
-                std.debug.assert(self.fb.pushed_stack_size == 0);
-                var epilogue_label = self.fb.allocLabel();
-                var emmiter = Emmiter(@TypeOf(writer)).init(
-                    writer,
-                    epilogue_label,
-                    self.fb.stack_size,
-                    self.regs.usedIter(),
-                    .{},
-                );
+        std.debug.assert(self.fb.pushed_stack_size == 0);
+        var epilogue_label = self.fb.allocLabel();
+        var emmiter = Emmiter(@TypeOf(writer)).init(
+            writer,
+            epilogue_label,
+            self.fb.stack_size,
+            self.regs.usedIter(),
+            .{},
+        );
 
-                try emmiter.writeLabel(item.index);
-                try emmiter.writePrologue();
-                try emmiter.writeInstrs(self.fb.instrs.items, self.types);
-                try emmiter.writeEpilogue();
+        try emmiter.writeLabel(@intCast(item.index));
+        try emmiter.writePrologue();
+        try emmiter.writeInstrs(self.fb.instrs.items, self.module);
+        try emmiter.writeEpilogue();
 
-                self.regs = .{};
-                self.fb.clear();
-            },
-        }
+        self.regs = .{};
+        self.fb.clear();
     }
 }
 
-fn genFunc(self: *Self, func: Ast.Item.Func) Error!void {
+fn genFunc(self: *Self, func: *const Ast.Item.Func) Error!void {
     const ret = self.types.getValue(func.ret).data.type;
 
     self.scope.clear(ret);
@@ -686,7 +687,7 @@ fn genExpr(self: *Self, expr: Ast.Expr.Id) InnerError!?Scope.Ref {
         });
     }
 
-    return switch (self.ast.exprs.get(expr)) {
+    return switch (self.exprs.get(expr)) {
         .Var => |v| try self.genVar(v),
         .Ret => |r| try self.genRet(r),
         .If => |i| try self.genIf(value, i),
@@ -997,12 +998,14 @@ fn popFrame(self: *Self, frame: Scope.Frame, comptime shift_last_slot: bool) !if
 }
 
 fn performTest(writer: anytype, comptime name: []const u8, alloc: std.mem.Allocator, src: []const u8) !void {
-    var ast = try Parser.parse(alloc, src);
+    var errors = std.ArrayListUnmanaged(Parser.ErrorMessage){};
+    defer errors.deinit(alloc);
+    var ast = try Parser.parse(alloc, src, &errors);
     defer ast.deinit(alloc);
-    for (ast.errors.items) |err| try writer.print("{any}", .{err});
-    try std.testing.expect(ast.errors.items.len == 0);
+    for (errors.items) |err| try err.print(writer, src);
+    try std.testing.expect(errors.items.len == 0);
 
-    var printer = Parser.Printer(@TypeOf(writer)).init(&ast, writer, src);
+    var printer = Ast.Printer(@TypeOf(writer)).init(&ast, writer, src);
     try printer.print();
 
     var types = try Typechk.check(alloc, &ast, src);
@@ -1122,28 +1125,28 @@ test "print" {
             \\    const j = i + 3;
             \\    var k: usize = j;
             \\    k = k + 5 + foo(4);
-            \\    var k: usize = j;
-            \\    k = k + 5 + foo(4);
-            \\    var k: usize = j;
-            \\    k = k + 5 + foo(4);
-            \\    var k: usize = j;
-            \\    k = k + 5 + foo(4);
-            \\    var k: usize = j;
-            \\    k = k + 5 + foo(4);
-            \\    var k: usize = j;
-            \\    k = k + 5 + foo(4);
-            \\    var k: usize = j;
-            \\    k = k + 5 + foo(4);
-            \\    var k: usize = j;
-            \\    k = k + 5 + foo(4);
-            \\    var k: usize = j;
-            \\    k = k + 5 + foo(4);
-            \\    var k: usize = j;
-            \\    k = k + 5 + foo(4);
-            \\    var k: usize = j;
-            \\    k = k + 5 + foo(4);
-            \\    var k: usize = j;
-            \\    k = k + 5 + foo(4);
+            \\    var l: usize = j;
+            \\    l = l + 5 + foo(4);
+            \\    var n: usize = j;
+            \\    n = n + 5 + foo(4);
+            \\    var m: usize = j;
+            \\    m = m + 5 + foo(4);
+            \\    var o: usize = j;
+            \\    o = o + 5 + foo(4);
+            \\    var p: usize = j;
+            \\    p = p + 5 + foo(4);
+            \\    var q: usize = j;
+            \\    q = q + 5 + foo(4);
+            \\    var r: usize = j;
+            \\    r = r + 5 + foo(4);
+            \\    var s: usize = j;
+            \\    s = s + 5 + foo(4);
+            \\    var t: usize = j;
+            \\    t = t + 5 + foo(4);
+            \\    var u: usize = j;
+            \\    u = u + 5 + foo(4);
+            \\    var v: usize = j;
+            \\    v = v + 5 + foo(4);
             \\    return k;
             \\}
             \\

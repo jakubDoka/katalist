@@ -1,34 +1,34 @@
-fn main() u64 {
-    let i = 1 + 2;
-    let j = i + 3;
-    let k = j;
-    k = k + 5 + foo(4);
-    let l = j;
-    l = l + 5 + foo(4);
-    let n = j;
-    n = n + 5 + foo(4);
-    let m = j;
-    m = m + 5 + foo(4);
-    let o = j;
-    o = o + 5 + foo(4);
-    let p = j;
-    p = p + 5 + foo(4);
-    let q = j;
-    q = q + 5 + foo(4);
-    let r = j;
-    r = r + 5 + foo(4);
-    let s = j;
-    s = s + 5 + foo(4);
-    let t = j;
-    t = t + 5 + foo(4);
-    let u = j;
-    u = u + 5 + foo(4);
-    let v = j;
-    v = v + 5 + foo(4);
-    ret k;
+fn main#false() u64 {
+    let i#false = 1 + 2;
+    let j#false = i#true + 3;
+    let k#false = j#false;
+    k#false = k#false + 5 + foo#false(4);
+    let l#false = j#false;
+    l#false = l#true + 5 + foo#false(4);
+    let n#false = j#false;
+    n#false = n#true + 5 + foo#false(4);
+    let m#false = j#false;
+    m#false = m#true + 5 + foo#false(4);
+    let o#false = j#false;
+    o#false = o#true + 5 + foo#false(4);
+    let p#false = j#false;
+    p#false = p#true + 5 + foo#false(4);
+    let q#false = j#false;
+    q#false = q#true + 5 + foo#false(4);
+    let r#false = j#false;
+    r#false = r#true + 5 + foo#false(4);
+    let s#false = j#false;
+    s#false = s#true + 5 + foo#false(4);
+    let t#false = j#false;
+    t#false = t#true + 5 + foo#false(4);
+    let u#false = j#false;
+    u#false = u#true + 5 + foo#false(4);
+    let v#false = j#true;
+    v#false = v#true + 5 + foo#false(4);
+    ret k#true;
 }
-fn foo(a: u64) u64 {
-    ret a + a + 4;
+fn foo#false(a#false: u64) u64 {
+    ret a#false + a#true + 4;
 }
     global main
 

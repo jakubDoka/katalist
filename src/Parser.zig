@@ -211,7 +211,6 @@ fn popFrame(self: *Parser, frame: Scope.Frame) !void {
         if (!sym.resolved) continue;
         switch (sym.last_occurence) {
             .Expr => |e| {
-                std.debug.print("unused symbol: {any} {any}\n", .{ e, sym });
                 switch (self.temp_exprs.get(self.expr_cp, e)) {
                     .Ident => |i| i.last = true,
                     else => unreachable,
@@ -462,7 +461,7 @@ fn addItem(self: *Parser, item: Ast.Item) !void {
     var arena = self.ast.arena.promote(self.alloc);
     const allocated = try item.clone(arena.allocator());
     self.ast.arena = arena.state;
-    const id = try self.ast.items.pushAbsolute(self.alloc, allocated);
+    const id = try self.temp_items.pushAbsolute(self.alloc, allocated);
     if (name.index >= self.ast.item_lookup.items.len)
         try self.ast.item_lookup.resize(self.alloc, name.index + 1);
     self.ast.item_lookup.items[name.index] = id;

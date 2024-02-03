@@ -79,10 +79,8 @@ fn handleSym(
         if (sym.ident.len != ident.len) continue;
         if (std.mem.eql(u8, sym.ident.slice(source), ident)) {
             if (sym.resolved and declare) return error.DuplicateSymbol;
-            if (declare) {
-                sym.resolved = true;
-                sym.last_occurence = loc;
-            }
+            sym.resolved = sym.resolved or declare;
+            if (!sym.ident.unordered or declare) sym.last_occurence = loc;
             sym.used = true;
             return sym.ident;
         }

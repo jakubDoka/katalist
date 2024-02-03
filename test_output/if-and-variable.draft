@@ -1,9 +1,9 @@
-fn main() u64 {
-    let a = if (false) 1 else if (foo()) 2 else 3;
-    a = a + 1;
-    ret a;
+fn main#false() u64 {
+    let a#false = if (false) 1 else if (foo#false()) 2 else 3;
+    a#false = a#false + 1;
+    ret a#true;
 }
-fn foo() bool {
+fn foo#false() bool {
     ret false;
 }
     global main

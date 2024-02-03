@@ -271,7 +271,7 @@ pub fn Unmanaged(comptime T: type) type {
             return cp;
         }
 
-        pub fn view(self: *Self, slice: Slice) View {
+        pub fn view(self: *const Self, slice: Slice) View {
             var vw: View = undefined;
             inline for (std.meta.fields(Storage)) |field| {
                 const src = &@field(self.storage, field.name);
@@ -342,9 +342,20 @@ pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
             return .{ .storage = storage };
         }
 
+        pub fn initView(based_on: ES.View, alloc: std.mem.Allocator) !Self {
+            var storage: Storage = undefined;
+            inline for (std.meta.fields(Storage)) |nm| {
+                @field(storage, nm.name) = .{};
+                try @field(storage, nm.name).resize(alloc, @field(based_on.view, nm.name).len);
+                if (is_debug) {
+                    for (@field(storage, nm.name).items) |*item| item.* = null;
+                }
+            }
+            return .{ .storage = storage };
+        }
+
         pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
             inline for (std.meta.fields(Storage)) |nm| {
-                if (nm.type == void) continue;
                 @field(self.storage, nm.name).deinit(alloc);
             }
         }
@@ -362,8 +373,8 @@ pub fn ShadowUnmanaged(comptime T: type, comptime ES: type) type {
         pub fn get(self: *const Self, id: ES.Index) ?T {
             return switch (id.tag) {
                 inline else => |tag| {
+                    if (!@hasField(Storage, @tagName(tag))) return null;
                     const field = &@field(self.storage, @tagName(tag));
-                    if (@TypeOf(field) == *const void) return null;
                     const value = field.items[id.index];
                     return if (is_debug) value.? else value;
                 },

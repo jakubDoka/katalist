@@ -1,9 +1,9 @@
-fn main() u64 {
-    ret fib(10);
+fn main#false() u64 {
+    ret fib#false(10);
 }
-fn fib(n: u64) u64 {
-    if (n < 2) ret n;
-    ret fib(n - 1) + fib(n - 2);
+fn fib#false(n#false: u64) u64 {
+    if (n#false < 2) ret n#false;
+    ret fib#false(n#false - 1) + fib#false(n#true - 2);
 }
     global main
 

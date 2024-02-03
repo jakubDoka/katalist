@@ -1,7 +1,7 @@
-fn main() u8 {
-    ret 254 + foo();
+fn main#false() u8 {
+    ret 254 + foo#false();
 }
-fn foo() u8 {
+fn foo#false() u8 {
     ret 2;
 }
     global main

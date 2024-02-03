@@ -205,6 +205,13 @@ pub const Expr = union(ExprTag) {
             };
         }
 
+        pub fn mutatesOperand(self: InfixOp) bool {
+            return switch (self) {
+                .Add, .Sub => true,
+                else => false,
+            };
+        }
+
         pub fn tryFromToken(token: Lexer.Token) ?InfixOp {
             return switch (token) {
                 inline else => |t| {
@@ -333,26 +340,25 @@ pub fn Printer(comptime W: type) type {
         writer: W,
         indent: usize,
         source: []const u8,
+        exprs: Expr.Store.View = undefined,
 
         pub fn init(ast: *const Ast, writer: W, source: []const u8) Self {
             return .{ .ast = ast, .writer = writer, .indent = 0, .source = source };
         }
 
         pub fn print(self: *Self) WriteError!void {
-            _ = self;
-            // for (self.ast.items) |item| {
-            //     try self.printItem(item);
-            //     try self.writer.writeByte('\n');
-            // }
-        }
-
-        fn printItem(self: *Self, item: Item.Id) WriteError!void {
-            switch (self.ast.items.get(item)) {
-                .Func => |s| try self.printFunction(s),
+            const view = self.ast.items.view(self.ast.root.items);
+            for (view.query(.Func)) |item| {
+                try self.printFunction(item);
+                try self.writer.writeByte('\n');
             }
         }
 
         fn printFunction(self: *Self, func: Item.Func) WriteError!void {
+            const prev = self.exprs;
+            defer self.exprs = prev;
+            self.exprs = self.ast.exprs.view(func.slice);
+
             try self.writer.writeAll("fn ");
             try self.printIdent(func.name);
             try self.writer.writeByte('(');
@@ -382,7 +388,7 @@ pub fn Printer(comptime W: type) type {
         }
 
         fn printExpr(self: *Self, expr: Expr.Id) WriteError!void {
-            return switch (self.ast.exprs.get(expr)) {
+            return switch (self.exprs.get(expr)) {
                 .Ident => |s| try self.printIdent(s),
                 .Int => |s| try self.writer.print("{d}", .{s}),
                 .Binary => |s| try self.printBinary(s),

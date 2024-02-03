@@ -1,0 +1,16 @@
+fn main#false() u64 {
+    ret (3 - 2) + 1;
+}
+    global main
+
+    section .text
+main:
+    push rbp
+    mov rbp, rsp
+    mov rax, 0x2
+    jmp L1
+L1:
+    mov rsp, rbp
+    pop rbp
+    ret
+exit code: child_process.ChildProcess.Term{ .Exited = 2 }
