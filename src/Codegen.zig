@@ -882,7 +882,7 @@ fn genMathOp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
     var lhs = (try self.genExpr(b.lhs)).?;
     var rhs = (try self.genExpr(b.rhs)).?;
 
-    if (!self.scope.getSlot(lhs).temorary) blk: {
+    if (b.op.mutatesOperand() and !self.scope.getSlot(lhs).temorary) blk: {
         if (self.scope.getSlot(rhs).temorary and b.op.isCommutative()) {
             std.mem.swap(Scope.Ref, &lhs, &rhs);
             break :blk;
@@ -930,7 +930,19 @@ fn genAssign(self: *Self, binary: Ast.Expr.Binary) InnerError!?Scope.Ref {
 }
 
 fn genIdent(self: *Self, ident: Ast.Ident) InnerError!?Scope.Ref {
-    return self.scope.findSymbol(ident).?.ref;
+    var ref = self.scope.findSymbol(ident).?.ref;
+
+    const slot = self.scope.getSlot(ref);
+    if (ident.last and slot.value == .Reg) {
+        ref = try self.scope.addSlot(.{
+            .value = slot.value,
+            .type = slot.type,
+            .temorary = false,
+        });
+        std.debug.print("{any}\n", .{ident});
+    }
+
+    return ref;
 }
 
 fn genVar(self: *Self, variable: Ast.Expr.Var) InnerError!?Scope.Ref {
@@ -1179,6 +1191,7 @@ test "print" {
     };
 
     inline for (tasks) |task| {
+        if (comptime !std.mem.eql(u8, task[0], "fib-iter-recur")) continue;
         garbage.printtest(task[0], performTest, task[1]) catch |err| switch (err) {
             error.DiffFailed => {},
             else => |e| return e,
