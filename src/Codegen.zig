@@ -396,7 +396,7 @@ const RegAlloc = struct {
     pub fn free(self: *RegAlloc, reg: Reg) void {
         const pos = @intFromEnum(reg);
         const bit = one << @intCast(pos);
-        std.debug.assert(self.allocated & bit != 1);
+        std.debug.assert(self.allocated & bit != 0);
         self.allocated &= ~bit;
         self.locations[pos] = null;
     }
@@ -500,6 +500,7 @@ const Scope = struct {
         symbol_len: usize,
         spill_len: usize,
         borrow_len: usize,
+        to_free_len: usize,
     };
 
     pub const Symbol = struct {
@@ -519,6 +520,7 @@ const Scope = struct {
 
     symbols: []Symbol,
     borrowed: std.ArrayList(Ref),
+    to_free: std.ArrayList(Ref),
     ret: Type.Id = Type.void_lit,
     slots: std.ArrayList(Slot),
 
@@ -527,12 +529,14 @@ const Scope = struct {
             .symbols = buffer[0..0],
             .slots = std.ArrayList(Slot).init(alloc),
             .borrowed = std.ArrayList(Ref).init(alloc),
+            .to_free = std.ArrayList(Ref).init(alloc),
         };
     }
 
     pub fn deinit(self: *Scope) void {
         self.slots.deinit();
         self.borrowed.deinit();
+        self.to_free.deinit();
     }
 
     pub fn clear(self: *Scope, ret: Type.Id) void {
@@ -545,6 +549,7 @@ const Scope = struct {
             .symbol_len = self.symbols.len,
             .spill_len = self.slots.items.len,
             .borrow_len = self.borrowed.items.len,
+            .to_free_len = self.to_free.items.len,
         };
     }
 
@@ -585,9 +590,7 @@ const Scope = struct {
             std.mem.swap(Slot, &self.slots.items[frame.spill_len], &self.slots.items[self.slots.items.len - 1]);
         }
 
-        for (self.borrowed.items[frame.borrow_len..]) |ref| {
-            self.slots.items[ref.index].borrowed = false;
-        }
+        self.to_free.items.len = frame.to_free_len;
         self.borrowed.items.len = frame.borrow_len;
         self.symbols.len = frame.symbol_len;
         self.slots.items.len = frame.spill_len + @intFromBool(shift_last_slot);
@@ -924,15 +927,14 @@ fn genMathOp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
 
     var lhs_slot = self.scope.getSlot(lhs);
     var rhs_slot = self.scope.getSlot(rhs);
-    var swapped = false;
+    const swapped = !lhs_slot.temorary;
 
-    if (!lhs_slot.temorary) {
+    if (swapped) {
         if (rhs_slot.temorary and b.op.isCommutative()) {
             std.mem.swap(*Scope.Slot, &lhs_slot, &rhs_slot);
         } else {
             lhs_slot = self.scope.getSlot(try self.ensureTemporary(lhs));
         }
-        swapped = true;
     }
 
     const binary = Instr.Binary{ .dst = lhs_slot.value, .src = rhs_slot.value };
@@ -978,10 +980,14 @@ fn genCmp(self: *Self, b: Ast.Expr.Binary) InnerError!?Scope.Ref {
 }
 
 fn genAssign(self: *Self, binary: Ast.Expr.Binary) InnerError!?Scope.Ref {
+    const frame = self.scope.pushFrame();
+
     const target = (try self.genExpr(binary.lhs)).?;
     const value = (try self.genExpr(binary.rhs)).?;
 
     try self.pushMov(value, target);
+
+    try self.popFrame(frame, false);
 
     return null;
 }
@@ -997,10 +1003,15 @@ fn genIdent(self: *Self, ident: Ast.Ident) InnerError!?Scope.Ref {
             .temorary = true,
         });
         slot.value = .Moved;
+        slot.borrowed = true;
+    } else if (ident.last and slot.value == .Reg) {
+        try self.scope.to_free.append(ref);
     }
 
-    slot.borrowed = true;
-    try self.scope.borrowed.append(ref);
+    if (!slot.borrowed) {
+        slot.borrowed = true;
+        try self.scope.borrowed.append(ref);
+    }
 
     return ref;
 }
@@ -1036,9 +1047,30 @@ fn genRet(self: *Self, ret: Ast.Expr.Id) InnerError!?Scope.Ref {
 
 fn popFrame(
     self: *Self,
-    frame: Scope.Frame,
+    p_frame: Scope.Frame,
     comptime shift_last_slot: bool,
 ) !if (shift_last_slot) Scope.Ref else void {
+    var frame = p_frame;
+
+    for (self.scope.borrowed.items[frame.borrow_len..]) |ref| {
+        std.debug.assert(self.scope.getSlot(ref).borrowed);
+        self.scope.getSlot(ref).borrowed = false;
+    }
+
+    for (self.scope.to_free.items[frame.to_free_len..]) |ref| {
+        const slot = self.scope.getSlot(ref);
+        if (slot.value != .Reg) continue;
+        if (!slot.borrowed) {
+            std.debug.print("TODO: {any}\n", .{slot});
+            self.regs.free(slot.value.Reg);
+            slot.value = .Moved;
+            continue;
+        }
+
+        self.scope.to_free.items[frame.to_free_len] = ref;
+        frame.to_free_len += 1;
+    }
+
     for (0..self.scope.slots.items.len -
         @intFromBool(shift_last_slot) - frame.spill_len) |ri|
     {
@@ -1200,7 +1232,7 @@ test "print" {
             \\}
         },
         .{
-            "spilling",
+            "proper-register-release",
             \\fn main() usize {
             \\    const i = 1 + 2;
             \\    const j = i + 3;
@@ -1236,6 +1268,42 @@ test "print" {
             \\}
         },
         .{
+            "spilling",
+            \\fn main() usize {
+            \\    const i = 1 + 2;
+            \\    const j = i + 3;
+            \\    var k: usize = j;
+            \\    k = k + 5 + foo(4);
+            \\    var l: usize = j;
+            \\    l = l + 5 + foo(4);
+            \\    var n: usize = j;
+            \\    n = n + 5 + foo(4);
+            \\    var m: usize = j;
+            \\    m = m + 5 + foo(4);
+            \\    var o: usize = j;
+            \\    o = o + 5 + foo(4);
+            \\    var p: usize = j;
+            \\    p = p + 5 + foo(4);
+            \\    var q: usize = j;
+            \\    q = q + 5 + foo(4);
+            \\    var r: usize = j;
+            \\    r = r + 5 + foo(4);
+            \\    var s: usize = j;
+            \\    s = s + 5 + foo(4);
+            \\    var t: usize = j;
+            \\    t = t + 5 + foo(4);
+            \\    var u: usize = j;
+            \\    u = u + 5 + foo(4);
+            \\    var v: usize = j;
+            \\    v = v + 5 + foo(4);
+            \\    return k + l - n + m - o + p - q + r - s + t - u + v;
+            \\}
+            \\
+            \\fn foo(a: usize) usize {
+            \\    return a + a + 4;
+            \\}
+        },
+        .{
             "simple-if",
             \\fn main() usize {
             \\    return if (false) 1 else if (foo()) 2 else 3;
@@ -1259,12 +1327,15 @@ test "print" {
         },
     };
 
+    var failed = false;
     inline for (tasks) |task| {
         std.debug.print("running test: {s}\n", .{task[0]});
         //if (comptime !std.mem.eql(u8, task[0], "spilling")) continue;
         garbage.printtest(task[0], performTest, task[1]) catch |err| switch (err) {
-            error.DiffFailed => {},
+            error.DiffFailed => failed = true,
             else => |e| return e,
         };
     }
+
+    if (failed) std.log.err("some tests failed", .{});
 }
